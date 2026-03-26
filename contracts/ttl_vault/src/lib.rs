@@ -164,7 +164,7 @@ impl TtlVaultContract {
     pub fn is_expired(env: &Env, vault_id: u64) -> bool {
         let vault: Vault = Self::load_vault(env, vault_id);
         let now = env.ledger().timestamp();
-        now > vault.last_check_in + vault.check_in_interval
+        now >= vault.last_check_in + vault.check_in_interval
     }
 
     pub fn get_vault(env: Env, vault_id: u64) -> Vault {

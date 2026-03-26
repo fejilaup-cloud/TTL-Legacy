@@ -210,3 +210,45 @@ fn test_update_beneficiary_while_locked_near_expiry() {
     let vault = client.get_vault(&vault_id);
     assert_eq!(vault.beneficiary, new_beneficiary);
 }
+
+#[test]
+fn test_is_expired_at_exact_deadline() {
+    let (env, owner, beneficiary) = setup();
+    let client = TtlVaultContractClient::new(&env, &env.register_contract(None, TtlVaultContract));
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &86400u64);
+
+    // Advance time by exactly the check_in_interval (boundary: now == deadline)
+    env.ledger().with_mut(|l| l.timestamp += 86400);
+
+    assert!(client.is_expired(&vault_id));
+    assert_eq!(client.get_ttl_remaining(&vault_id), 0);
+}
+
+#[test]
+fn test_is_not_expired_one_second_before_deadline() {
+    let (env, owner, beneficiary) = setup();
+    let client = TtlVaultContractClient::new(&env, &env.register_contract(None, TtlVaultContract));
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &86400u64);
+
+    // Advance time to one second before the deadline (boundary: now == deadline - 1)
+    env.ledger().with_mut(|l| l.timestamp += 86399);
+
+    assert!(!client.is_expired(&vault_id));
+    assert_eq!(client.get_ttl_remaining(&vault_id), 1);
+}
+
+#[test]
+fn test_expired_and_ttl_remaining_consistency_at_boundary() {
+    let (env, owner, beneficiary) = setup();
+    let client = TtlVaultContractClient::new(&env, &env.register_contract(None, TtlVaultContract));
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &86400u64);
+
+    // One second past the deadline — both functions must agree: expired, TTL == 0
+    env.ledger().with_mut(|l| l.timestamp += 86401);
+
+    assert!(client.is_expired(&vault_id));
+    assert_eq!(client.get_ttl_remaining(&vault_id), 0);
+}
