@@ -644,3 +644,18 @@ fn test_min_and_max_both_enforced() {
     let vault_id = client.create_vault(&owner, &beneficiary, &1_800u64);
     assert_eq!(client.get_vault(&vault_id).check_in_interval, 1_800u64);
 }
+
+// ---- Issue 48: non-owner cannot call check_in ----
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_non_owner_cannot_call_check_in() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let non_owner = Address::generate(&env);
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    // Call check_in from non-owner address - should panic with NotOwner error
+    client.with_source_address(&non_owner).check_in(&vault_id, &non_owner);
+    let _ = env;
+}
