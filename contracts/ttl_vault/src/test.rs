@@ -68,6 +68,18 @@ fn test_vault_count_view() {
 }
 
 #[test]
+fn test_vault_exists_for_existing_and_missing_ids() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+
+    assert!(!client.vault_exists(&1));
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    assert!(client.vault_exists(&vault_id));
+    assert!(!client.vault_exists(&(vault_id + 1)));
+}
+
+#[test]
 fn test_get_release_status_view() {
     let (env, owner, beneficiary, _, token_address, client) = setup();
 

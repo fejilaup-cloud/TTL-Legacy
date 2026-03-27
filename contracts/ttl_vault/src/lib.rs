@@ -303,6 +303,10 @@ impl TtlVaultContract {
         Self::load_vault(&env, vault_id)
     }
 
+    pub fn vault_exists(env: Env, vault_id: u64) -> bool {
+        env.storage().persistent().has(&DataKey::Vault(vault_id))
+    }
+
     pub fn get_vaults_by_owner(env: Env, owner: Address) -> Vec<u64> {
         Self::load_owner_vault_ids(&env, &owner)
     }
