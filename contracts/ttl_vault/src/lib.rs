@@ -72,6 +72,13 @@ impl TtlVaultContract {
         Self::load_paused(&env)
     }
 
+    pub fn get_admin(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized")
+    }
+
     // --- vault lifecycle ---
 
     /// Create a new vault. Returns the vault ID.
