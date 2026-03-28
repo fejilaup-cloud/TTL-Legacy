@@ -508,8 +508,10 @@ impl TtlVaultContract {
     /// # Returns
     /// The remaining TTL in seconds (0 if expired)
     pub fn ping_expiry(env: Env, vault_id: u64) -> u64 {
-        let ttl = Self::get_ttl_remaining(env.clone(), vault_id)
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::VaultNotFound));
+        if Self::try_load_vault(&env, vault_id).is_none() {
+            panic_with_error!(&env, ContractError::VaultNotFound);
+        }
+        let ttl = Self::get_ttl_remaining(env.clone(), vault_id).unwrap_or(0);
         if ttl < EXPIRY_WARNING_THRESHOLD {
             env.events().publish((PING_EXPIRY_TOPIC, vault_id), ttl);
         }
@@ -710,13 +712,13 @@ impl TtlVaultContract {
     /// * `vault_id` - The unique identifier of the vault
     ///
     /// # Returns
-    /// `Some(seconds)` with the remaining time in seconds, or `None` if the vault doesn't exist.
-    /// Returns `Some(0)` if the vault has already expired.
+    /// `Some(seconds)` with the remaining time in seconds if the vault exists and has not expired,
+    /// `None` if the vault does not exist or the TTL has already lapsed.
     pub fn get_ttl_remaining(env: Env, vault_id: u64) -> Option<u64> {
         let vault = Self::try_load_vault(&env, vault_id)?;
         let deadline = vault.last_check_in + vault.check_in_interval;
         let now = env.ledger().timestamp();
-        if now >= deadline { Some(0) } else { Some(deadline - now) }
+        if now >= deadline { None } else { Some(deadline - now) }
     }
 
     /// Returns the current release status of a vault.

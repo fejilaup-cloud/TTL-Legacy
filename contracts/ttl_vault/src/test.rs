@@ -321,10 +321,18 @@ fn test_ping_expiry_returns_zero_when_expired() {
 }
 
 #[test]
-#[should_panic]
-fn test_ping_expiry_panics_for_nonexistent_vault() {
+fn test_get_ttl_remaining_returns_none_when_expired() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    assert!(client.get_ttl_remaining(&vault_id).is_none());
+}
+
+#[test]
+fn test_get_ttl_remaining_returns_none_for_nonexistent_vault() {
     let (_, _, _, _, _, client) = setup();
-    client.ping_expiry(&9999u64);
+    assert!(client.get_ttl_remaining(&9999u64).is_none());
 }
 
 // ---- Task 2: partial_release tests ----
