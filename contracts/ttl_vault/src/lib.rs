@@ -392,7 +392,7 @@ impl TtlVaultContract {
     /// Deposits funds into multiple vaults in a single transfer.
     ///
     /// This is more efficient than calling `deposit` multiple times as it only
-    /// requires one token transfer. All vaults must be in Locked status.
+    /// requires one token transfer. All vaults must be in Locked status and not expired.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment
@@ -403,6 +403,7 @@ impl TtlVaultContract {
     /// * Panics if the contract is paused
     /// * Panics if any amount is not positive
     /// * Panics if any vault is not in Locked status
+    /// * Panics if any vault has expired
     /// * Panics if the total amount overflows
     pub fn batch_deposit(env: Env, from: Address, deposits: Vec<(u64, i128)>) {
         Self::assert_not_paused(&env);
@@ -420,6 +421,11 @@ impl TtlVaultContract {
             let vault = Self::load_vault(&env, vault_id);
             if vault.status != ReleaseStatus::Locked {
                 panic_with_error!(&env, ContractError::AlreadyReleased);
+            }
+
+            let now = env.ledger().timestamp();
+            if now >= vault.last_check_in + vault.check_in_interval {
+                panic_with_error!(&env, ContractError::VaultExpired);
             }
 
             total_amount = total_amount
