@@ -801,3 +801,75 @@ fn test_full_vault_lifecycle_end_to_end() {
     let vault = client.get_vault(&vault_id);
     assert_eq!(vault.balance, 0i128);
 }
+
+// ---- Multiple Vaults Independent State Test ----
+
+#[test]
+fn test_multiple_vaults_created_by_same_owner_have_unique_ids() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    // Create 3 vaults from the same owner with different beneficiaries and check-in intervals
+    let beneficiary1 = Address::generate(&env);
+    let beneficiary2 = Address::generate(&env);
+    let beneficiary3 = Address::generate(&env);
+
+    let id_1 = client.create_vault(&owner, &beneficiary1, &100u64);
+    let id_2 = client.create_vault(&owner, &beneficiary2, &200u64);
+    let id_3 = client.create_vault(&owner, &beneficiary3, &300u64);
+
+    // Assert IDs are 1, 2, 3
+    assert_eq!(id_1, 1);
+    assert_eq!(id_2, 2);
+    assert_eq!(id_3, 3);
+
+    // Assert each vault has independent state
+    let vault1 = client.get_vault(&id_1);
+    let vault2 = client.get_vault(&id_2);
+    let vault3 = client.get_vault(&id_3);
+
+    // Check each vault has correct owner
+    assert_eq!(vault1.owner, owner);
+    assert_eq!(vault2.owner, owner);
+    assert_eq!(vault3.owner, owner);
+
+    // Check each vault has different beneficiary
+    assert_eq!(vault1.beneficiary, beneficiary1);
+    assert_eq!(vault2.beneficiary, beneficiary2);
+    assert_eq!(vault3.beneficiary, beneficiary3);
+
+    // Check each vault has different check-in interval
+    assert_eq!(vault1.check_in_interval, 100u64);
+    assert_eq!(vault2.check_in_interval, 200u64);
+    assert_eq!(vault3.check_in_interval, 300u64);
+
+    // Check each vault starts with zero balance
+    assert_eq!(vault1.balance, 0i128);
+    assert_eq!(vault2.balance, 0i128);
+    assert_eq!(vault3.balance, 0i128);
+
+    // Check all are locked
+    assert_eq!(vault1.status, ReleaseStatus::Locked);
+    assert_eq!(vault2.status, ReleaseStatus::Locked);
+    assert_eq!(vault3.status, ReleaseStatus::Locked);
+
+    // Deposit into vault 2 only
+    client.deposit(&id_2, &owner, &500i128);
+
+    // Verify only vault 2 balance changed
+    let vault1 = client.get_vault(&id_1);
+    let vault2 = client.get_vault(&id_2);
+    let vault3 = client.get_vault(&id_3);
+
+    assert_eq!(vault1.balance, 0i128);
+    assert_eq!(vault2.balance, 500i128);
+    assert_eq!(vault3.balance, 0i128);
+
+    // Verify vault count
+    assert_eq!(client.vault_count(), 3);
+
+    // Verify get_vaults_by_owner returns all 3 IDs
+    assert_eq!(
+        client.get_vaults_by_owner(&owner),
+        vec![&env, id_1, id_2, id_3]
+    );
+}
