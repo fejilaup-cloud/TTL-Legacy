@@ -183,7 +183,7 @@ fn test_paused_blocks_check_in_withdraw_and_trigger_release() {
     client.pause();
 
     assert!(client.try_check_in(&vault_id, &owner).is_err());
-    assert!(client.try_withdraw(&vault_id, &10i128).is_err());
+    assert!(client.try_withdraw(&vault_id, &owner, &10i128).is_err());
     assert!(client.try_trigger_release(&vault_id).is_err());
 
     client.unpause();
@@ -254,7 +254,7 @@ fn test_transfer_ownership_updates_owner_and_owner_index() {
     assert_eq!(client.get_vaults_by_owner(&owner, &0u32, &10u32), vec![&env, vault_id]);
     assert_eq!(client.get_vaults_by_owner(&new_owner, &0u32, &10u32), vec![&env]);
 
-    client.transfer_ownership(&vault_id, &new_owner);
+    client.transfer_ownership(&vault_id, &owner, &new_owner);
 
     assert_eq!(client.get_vault(&vault_id).owner, new_owner);
     assert_eq!(client.get_vaults_by_owner(&owner, &0u32, &10u32), vec![&env]);
@@ -272,7 +272,7 @@ fn test_transfer_ownership_rejects_new_owner_equal_to_beneficiary() {
     // beneficiary is the vault's primary beneficiary; transferring ownership to
     // them would violate the owner != beneficiary invariant.
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
-    client.transfer_ownership(&vault_id, &beneficiary);
+    client.transfer_ownership(&vault_id, &owner, &beneficiary);
 }
 
 /// BeneficiaryVaults index must remain consistent after a successful ownership transfer.
@@ -286,13 +286,13 @@ fn test_transfer_ownership_preserves_beneficiary_index() {
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
 
     // beneficiary index contains the vault before transfer
-    assert_eq!(client.get_vaults_by_beneficiary(&beneficiary), vec![&env, vault_id]);
+    assert_eq!(client.get_vaults_by_beneficiary(&beneficiary, &0u32, &10u32), vec![&env, vault_id]);
 
-    client.transfer_ownership(&vault_id, &new_owner);
+    client.transfer_ownership(&vault_id, &owner, &new_owner);
 
     // vault.beneficiary is unchanged — index must still be intact
     assert_eq!(client.get_vault(&vault_id).beneficiary, beneficiary);
-    assert_eq!(client.get_vaults_by_beneficiary(&beneficiary), vec![&env, vault_id]);
+    assert_eq!(client.get_vaults_by_beneficiary(&beneficiary, &0u32, &10u32), vec![&env, vault_id]);
 }
 
 #[test]
@@ -465,8 +465,8 @@ fn test_update_metadata_can_be_overwritten() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
 
-    client.update_metadata(&vault_id, &soroban_sdk::String::from_str(&env, "v1"));
-    client.update_metadata(&vault_id, &soroban_sdk::String::from_str(&env, "v2"));
+    client.update_metadata(&vault_id, &owner, &soroban_sdk::String::from_str(&env, "v1"));
+    client.update_metadata(&vault_id, &owner, &soroban_sdk::String::from_str(&env, "v2"));
 
     assert_eq!(
         client.get_vault(&vault_id).metadata,
@@ -630,7 +630,7 @@ fn test_withdraw_rejects_zero_amount() {
     client.deposit(&vault_id, &owner, &500i128);
 
     // zero amount should return InvalidAmount (#5)
-    let result = client.try_withdraw(&vault_id, &0i128);
+    let result = client.try_withdraw(&vault_id, &owner, &0i128);
     assert!(result.is_err(), "expected error for zero-amount withdrawal");
 }
 
@@ -642,7 +642,7 @@ fn test_withdraw_rejects_negative_amount() {
     client.deposit(&vault_id, &owner, &500i128);
 
     // negative amount should also return InvalidAmount (#5)
-    let result = client.try_withdraw(&vault_id, &-1i128);
+    let result = client.try_withdraw(&vault_id, &owner, &-1i128);
     assert!(result.is_err(), "expected error for negative-amount withdrawal");
 }
 
@@ -677,7 +677,7 @@ fn test_withdraw_emits_event() {
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
     client.deposit(&vault_id, &owner, &500i128);
 
-    client.withdraw(&vault_id, &100i128);
+    client.withdraw(&vault_id, &owner, &100i128);
 
     let events = env.events().all();
     let withdraw_event = events.iter().find(|e| {
@@ -729,6 +729,7 @@ fn test_set_beneficiaries_rejects_owner_as_beneficiary() {
     // owner sneaks themselves into the multi-split list
     client.set_beneficiaries(
         &vault_id,
+        &owner,
         &vec![
             &env,
             BeneficiaryEntry { address: owner.clone(), bps: 5_000 },
@@ -773,6 +774,7 @@ fn test_partial_release_with_multi_beneficiary_applies_bps_split() {
     // 60/40 split
     client.set_beneficiaries(
         &vault_id,
+        &owner,
         &vec![
             &env,
             BeneficiaryEntry { address: beneficiary.clone(), bps: 6_000 },
@@ -804,6 +806,7 @@ fn test_partial_release_with_multi_beneficiary_last_entry_absorbs_dust() {
     // 33/67 split — integer division leaves dust on the last entry
     client.set_beneficiaries(
         &vault_id,
+        &owner,
         &vec![
             &env,
             BeneficiaryEntry { address: beneficiary.clone(), bps: 3_300 },
@@ -843,13 +846,13 @@ fn test_update_beneficiary_updates_index() {
     let vault_id = client.create_vault(&owner, &old_beneficiary, &100u64);
 
     // old beneficiary sees the vault, new one does not
-    assert_eq!(client.get_vaults_by_beneficiary(&old_beneficiary), vec![&env, vault_id]);
-    assert_eq!(client.get_vaults_by_beneficiary(&new_beneficiary), vec![&env]);
+    assert_eq!(client.get_vaults_by_beneficiary(&old_beneficiary, &0u32, &10u32), vec![&env, vault_id]);
+    assert_eq!(client.get_vaults_by_beneficiary(&new_beneficiary, &0u32, &10u32), vec![&env]);
 
     client.update_beneficiary(&vault_id, &new_beneficiary);
 
     // old beneficiary no longer sees the vault
-    assert_eq!(client.get_vaults_by_beneficiary(&old_beneficiary), vec![&env]);
+    assert_eq!(client.get_vaults_by_beneficiary(&old_beneficiary, &0u32, &10u32), vec![&env]);
     // new beneficiary now sees the vault
-    assert_eq!(client.get_vaults_by_beneficiary(&new_beneficiary), vec![&env, vault_id]);
+    assert_eq!(client.get_vaults_by_beneficiary(&new_beneficiary, &0u32, &10u32), vec![&env, vault_id]);
 }
