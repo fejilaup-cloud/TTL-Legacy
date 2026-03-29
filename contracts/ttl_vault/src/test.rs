@@ -209,6 +209,32 @@ fn test_update_check_in_interval() {
 }
 
 #[test]
+fn test_update_check_in_interval_extends_vault_storage_ttl() {
+    // Create a vault with a short interval (100s → TTL = VAULT_TTL_LEDGERS minimum).
+    // Increase the interval to a large value whose derived TTL exceeds the minimum.
+    // The vault must still be readable after the update, confirming save_vault
+    // re-extended persistent storage using the new (larger) interval.
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    // 30-day interval: vault_ttl_ledgers(2_592_000) = 1_036_800 ledgers > VAULT_TTL_LEDGERS
+    let long_interval: u64 = 30 * 24 * 3600; // 2_592_000 seconds
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    // Increase interval — save_vault must use the new interval for extend_ttl
+    client.update_check_in_interval(&vault_id, &long_interval);
+
+    // Vault is readable and carries the updated interval
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.check_in_interval, long_interval);
+
+    // Advance time just under the new interval — vault must still be accessible
+    env.ledger().with_mut(|l| l.timestamp += long_interval - 1);
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.check_in_interval, long_interval);
+}
+
+#[test]
 fn test_transfer_ownership_updates_owner_and_owner_index() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let new_owner = Address::generate(&env);

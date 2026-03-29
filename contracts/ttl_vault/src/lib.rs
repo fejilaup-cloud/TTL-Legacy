@@ -854,6 +854,14 @@ impl TtlVaultContract {
         }
         vault.check_in_interval = new_interval;
         Self::save_vault(&env, vault_id, &vault);
+        // Explicitly re-extend the vault's persistent TTL using the new (potentially
+        // longer) interval so storage outlives the updated check-in deadline.
+        let new_ttl = vault_ttl_ledgers(new_interval);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Vault(vault_id),
+            VAULT_TTL_THRESHOLD,
+            new_ttl,
+        );
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         Ok(())
     }
