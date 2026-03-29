@@ -191,7 +191,7 @@ fn test_get_vaults_by_owner_tracks_multiple_vaults() {
     let vault_id_2 = client.create_vault(&owner, &beneficiary, &200u64);
 
     assert_eq!(
-        client.get_vaults_by_owner(&owner),
+        client.get_vaults_by_owner(&owner, &0u32, &10u32),
         vec![&env, vault_id_1, vault_id_2]
     );
 }
@@ -209,19 +209,45 @@ fn test_update_check_in_interval() {
 }
 
 #[test]
+fn test_update_check_in_interval_extends_vault_storage_ttl() {
+    // Create a vault with a short interval (100s → TTL = VAULT_TTL_LEDGERS minimum).
+    // Increase the interval to a large value whose derived TTL exceeds the minimum.
+    // The vault must still be readable after the update, confirming save_vault
+    // re-extended persistent storage using the new (larger) interval.
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    // 30-day interval: vault_ttl_ledgers(2_592_000) = 1_036_800 ledgers > VAULT_TTL_LEDGERS
+    let long_interval: u64 = 30 * 24 * 3600; // 2_592_000 seconds
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    // Increase interval — save_vault must use the new interval for extend_ttl
+    client.update_check_in_interval(&vault_id, &long_interval);
+
+    // Vault is readable and carries the updated interval
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.check_in_interval, long_interval);
+
+    // Advance time just under the new interval — vault must still be accessible
+    env.ledger().with_mut(|l| l.timestamp += long_interval - 1);
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.check_in_interval, long_interval);
+}
+
+#[test]
 fn test_transfer_ownership_updates_owner_and_owner_index() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let new_owner = Address::generate(&env);
 
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
-    assert_eq!(client.get_vaults_by_owner(&owner), vec![&env, vault_id]);
-    assert_eq!(client.get_vaults_by_owner(&new_owner), vec![&env]);
+    assert_eq!(client.get_vaults_by_owner(&owner, &0u32, &10u32), vec![&env, vault_id]);
+    assert_eq!(client.get_vaults_by_owner(&new_owner, &0u32, &10u32), vec![&env]);
 
     client.transfer_ownership(&vault_id, &new_owner);
 
     assert_eq!(client.get_vault(&vault_id).owner, new_owner);
-    assert_eq!(client.get_vaults_by_owner(&owner), vec![&env]);
-    assert_eq!(client.get_vaults_by_owner(&new_owner), vec![&env, vault_id]);
+    assert_eq!(client.get_vaults_by_owner(&owner, &0u32, &10u32), vec![&env]);
+    assert_eq!(client.get_vaults_by_owner(&new_owner, &0u32, &10u32), vec![&env, vault_id]);
 }
 
 #[test]
@@ -355,6 +381,63 @@ fn test_partial_release_transfers_amount_to_beneficiary() {
 
 #[test]
 fn test_partial_release_fails_if_insufficient_balance() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &100i128);
+
+    let result = client.try_partial_release(&vault_id, &500i128);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_partial_release_fails_after_release() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &500i128);
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.trigger_release(&vault_id);
+
+    let result = client.try_partial_release(&vault_id, &100i128);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_partial_release_multiple_times_reduces_balance() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let token_client = token::Client::new(&env, &token_address);
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    client.partial_release(&vault_id, &200i128);
+    client.partial_release(&vault_id, &300i128);
+
+    assert_eq!(client.get_vault(&vault_id).balance, 500i128);
+    assert_eq!(token_client.balance(&beneficiary), 500i128);
+    assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Locked);
+}
+
+#[test]
+fn test_partial_release_emits_event() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    client.partial_release(&vault_id, &400i128);
+
+    let events = env.events().all();
+    let partial_event = events.iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
+        if topics.len() < 1 {
+            return false;
+        }
+        let topic0: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        topic0.map(|s| s == soroban_sdk::symbol_short!("partial")).unwrap_or(false)
+    });
+    assert!(partial_event.is_some(), "partial event not emitted");
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #11)")]
 fn test_update_beneficiary_rejects_owner_as_beneficiary() {
     let (_, owner, beneficiary, _, _, client) = setup();
@@ -419,18 +502,18 @@ fn test_get_vaults_by_beneficiary_tracks_vaults() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let other_beneficiary = Address::generate(&env);
 
-    assert_eq!(client.get_vaults_by_beneficiary(&beneficiary), vec![&env]);
+    assert_eq!(client.get_vaults_by_beneficiary(&beneficiary, &0u32, &10u32), vec![&env]);
 
     let vault_id_1 = client.create_vault(&owner, &beneficiary, &100u64);
     let vault_id_2 = client.create_vault(&owner, &beneficiary, &200u64);
     let _vault_id_3 = client.create_vault(&owner, &other_beneficiary, &300u64);
 
     assert_eq!(
-        client.get_vaults_by_beneficiary(&beneficiary),
+        client.get_vaults_by_beneficiary(&beneficiary, &0u32, &10u32),
         vec![&env, vault_id_1, vault_id_2]
     );
     assert_eq!(
-        client.get_vaults_by_beneficiary(&other_beneficiary),
+        client.get_vaults_by_beneficiary(&other_beneficiary, &0u32, &10u32),
         vec![&env, _vault_id_3]
     );
 }
@@ -439,7 +522,7 @@ fn test_get_vaults_by_beneficiary_tracks_vaults() {
 fn test_get_vaults_by_beneficiary_empty_for_unknown() {
     let (env, _, _, _, _, client) = setup();
     let stranger = Address::generate(&env);
-    assert_eq!(client.get_vaults_by_beneficiary(&stranger), vec![&env]);
+    assert_eq!(client.get_vaults_by_beneficiary(&stranger, &0u32, &10u32), vec![&env]);
 }
 
 // ---- Issue 2: upgrade ----
