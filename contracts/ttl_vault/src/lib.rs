@@ -9,7 +9,7 @@ mod types;
 use types::{
     BeneficiaryEntry, DataKey, ReleaseEvent, ReleaseStatus, Vault, EXPIRY_WARNING_THRESHOLD,
     CANCEL_TOPIC, CHECK_IN_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC, PING_EXPIRY_TOPIC,
-    RELEASE_TOPIC, VAULT_CREATED_TOPIC, WITHDRAW_TOPIC,
+    RELEASE_TOPIC, VAULT_CREATED_TOPIC, WITHDRAW_TOPIC, MAX_METADATA_LEN,
 };
 
 #[cfg(test)]
@@ -296,12 +296,14 @@ impl TtlVaultContract {
         }
 
         let vault_id = Self::vault_count(env.clone()) + 1;
+        let timestamp = env.ledger().timestamp();
         let vault = Vault {
             owner: owner.clone(),
             beneficiary: beneficiary.clone(),
             balance: 0,
             check_in_interval,
-            last_check_in: env.ledger().timestamp(),
+            last_check_in: timestamp,
+            created_at: timestamp,
             status: ReleaseStatus::Locked,
             beneficiaries: Vec::new(&env),
             metadata: String::from_str(&env, ""),
@@ -319,7 +321,7 @@ impl TtlVaultContract {
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish(
             (VAULT_CREATED_TOPIC,),
-            (vault_id, owner, beneficiary, check_in_interval),
+            (vault_id, owner, beneficiary, check_in_interval, timestamp),
         );
         vault_id
     }
@@ -748,6 +750,9 @@ impl TtlVaultContract {
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
     pub fn update_metadata(env: Env, vault_id: u64, caller: Address, metadata: String) -> Result<(), ContractError> {
             caller.require_auth();
+            if metadata.len() > MAX_METADATA_LEN {
+                return Err(ContractError::InvalidAmount);
+            }
             let mut vault = Self::load_vault(&env, vault_id);
             if caller != vault.owner {
                 return Err(ContractError::NotOwner);

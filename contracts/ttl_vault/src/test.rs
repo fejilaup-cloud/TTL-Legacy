@@ -1154,3 +1154,48 @@ fn test_trigger_release_zero_balance_multi_beneficiary_returns_empty_vault() {
     // should panic with EmptyVault before iterating beneficiaries
     client.trigger_release(&vault_id);
 }
+
+#[test]
+fn test_cancel_vault_refunds_full_balance_to_owner() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let token_client = token::Client::new(&env, &token_address);
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    let deposit_amount = 500i128;
+    client.deposit(&vault_id, &owner, &deposit_amount);
+
+    let owner_balance_before = token_client.balance(&owner);
+    client.cancel_vault(&vault_id);
+    let owner_balance_after = token_client.balance(&owner);
+
+    assert_eq!(owner_balance_after - owner_balance_before, deposit_amount);
+    assert_eq!(client.get_vault(&vault_id).balance, 0i128);
+    assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Cancelled);
+
+    // Second cancel_vault call should fail
+    assert!(client.try_cancel_vault(&vault_id).is_err());
+}
+
+#[test]
+fn test_transfer_ownership_updates_owner_index_and_blocks_old_owner() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let new_owner = Address::generate(&env);
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    // old owner sees the vault
+    assert_eq!(client.get_vaults_by_owner(&owner, &0u32, &10u32), vec![&env, vault_id]);
+    // new owner does not see the vault yet
+    assert_eq!(client.get_vaults_by_owner(&new_owner, &0u32, &10u32), vec![&env]);
+
+    client.transfer_ownership(&vault_id, &owner, &new_owner);
+
+    // old owner no longer sees the vault
+    assert_eq!(client.get_vaults_by_owner(&owner, &0u32, &10u32), vec![&env]);
+    // new owner now sees the vault
+    assert_eq!(client.get_vaults_by_owner(&new_owner, &0u32, &10u32), vec![&env, vault_id]);
+
+    // old owner cannot call check_in
+    assert!(client.try_check_in(&vault_id, &owner).is_err());
+}
+}
