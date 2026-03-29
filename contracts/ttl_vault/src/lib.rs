@@ -392,7 +392,7 @@ impl TtlVaultContract {
     /// Deposits funds into multiple vaults in a single transfer.
     ///
     /// This is more efficient than calling `deposit` multiple times as it only
-    /// requires one token transfer. All vaults must be in Locked status.
+    /// requires one token transfer. All vaults must be in Locked status and not expired.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment
@@ -403,6 +403,7 @@ impl TtlVaultContract {
     /// * Panics if the contract is paused
     /// * Panics if any amount is not positive
     /// * Panics if any vault is not in Locked status
+    /// * Panics if any vault has expired
     /// * Panics if the total amount overflows
     pub fn batch_deposit(env: Env, from: Address, deposits: Vec<(u64, i128)>) {
         Self::assert_not_paused(&env);
@@ -420,6 +421,11 @@ impl TtlVaultContract {
             let vault = Self::load_vault(&env, vault_id);
             if vault.status != ReleaseStatus::Locked {
                 panic_with_error!(&env, ContractError::AlreadyReleased);
+            }
+
+            let now = env.ledger().timestamp();
+            if now >= vault.last_check_in + vault.check_in_interval {
+                panic_with_error!(&env, ContractError::VaultExpired);
             }
 
             total_amount = total_amount
@@ -602,6 +608,7 @@ impl TtlVaultContract {
     /// * `ContractError::InvalidAmount` - If amount is not positive
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    /// * `ContractError::VaultExpired` - If vault has expired
     /// * `ContractError::InsufficientBalance` - If vault balance is less than amount
     pub fn partial_release(env: Env, vault_id: u64, amount: i128) -> Result<(), ContractError> {
         Self::assert_not_paused(&env);
@@ -612,6 +619,9 @@ impl TtlVaultContract {
         vault.owner.require_auth();
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
+        }
+        if Self::is_expired(env.clone(), vault_id) {
+            return Err(ContractError::VaultExpired);
         }
         if vault.balance < amount {
             return Err(ContractError::InsufficientBalance);
@@ -875,20 +885,27 @@ impl TtlVaultContract {
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The address of the caller (must be the vault owner)
     /// * `new_beneficiary` - The new beneficiary address
     ///
-    /// # Panics
-    /// * Panics if the caller is not the vault owner
-    /// * Panics if the vault is not in Locked status (already released or cancelled)
-    pub fn update_beneficiary(env: Env, vault_id: u64, new_beneficiary: Address) {
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn update_beneficiary(env: Env, vault_id: u64, caller: Address, new_beneficiary: Address) -> Result<(), ContractError> {
+        caller.require_auth();
         let mut vault = Self::load_vault(&env, vault_id);
-        vault.owner.require_auth();
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
         if vault.status != ReleaseStatus::Locked {
-            panic_with_error!(&env, ContractError::AlreadyReleased);
+            return Err(ContractError::AlreadyReleased);
         }
 
         if vault.owner == new_beneficiary {
-            panic_with_error!(&env, ContractError::InvalidBeneficiary);
+            return Err(ContractError::InvalidBeneficiary);
         }
 
         let old_beneficiary = vault.beneficiary.clone();
@@ -899,6 +916,7 @@ impl TtlVaultContract {
             Self::remove_beneficiary_vault_id(&env, &old_beneficiary, vault_id);
             Self::add_beneficiary_vault_id(&env, &new_beneficiary, vault_id);
         }
+        Ok(())
     }
 
     /// Updates the check-in interval for a vault.
@@ -959,6 +977,7 @@ impl TtlVaultContract {
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The address of the caller (must be the vault owner)
     ///
     /// # Returns
     /// `Ok(())` on success, `Err` on failure
@@ -967,12 +986,15 @@ impl TtlVaultContract {
     /// * `ContractError::Paused` - If the contract is paused
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
-    pub fn cancel_vault(env: Env, vault_id: u64) -> Result<(), ContractError> {
+    pub fn cancel_vault(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
         if Self::load_paused(&env) {
             return Err(ContractError::Paused);
         }
+        caller.require_auth();
         let mut vault = Self::load_vault(&env, vault_id);
-        vault.owner.require_auth();
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
         }

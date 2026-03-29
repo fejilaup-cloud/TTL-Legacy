@@ -155,6 +155,30 @@ fn test_batch_deposit_validates_all_items_before_transfer() {
 }
 
 #[test]
+fn test_batch_deposit_rejected_when_any_vault_expired() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+
+    let vault_id_1 = client.create_vault(&owner, &beneficiary, &100u64);
+    let vault_id_2 = client.create_vault(&owner, &beneficiary, &200u64);
+    let token_client = token::Client::new(&env, &token_address);
+
+    // Advance time past vault_id_1's expiry
+    env.ledger().with_mut(|l| l.timestamp += 150);
+
+    // batch_deposit should fail because vault_id_1 is expired
+    assert!(
+        client
+            .try_batch_deposit(&owner, &vec![&env, (vault_id_1, 100i128), (vault_id_2, 200i128)])
+            .is_err()
+    );
+
+    // No funds should have been transferred
+    assert_eq!(client.get_vault(&vault_id_1).balance, 0i128);
+    assert_eq!(client.get_vault(&vault_id_2).balance, 0i128);
+    assert_eq!(token_client.balance(&owner), 1_000_000i128);
+}
+
+#[test]
 fn test_pause_and_unpause_toggle() {
     let (_, _, _, _, _, client) = setup();
 
@@ -305,9 +329,19 @@ fn test_cancel_vault_refunds_owner_and_marks_cancelled() {
     client.deposit(&vault_id, &owner, &400i128);
     assert_eq!(token_client.balance(&owner), 999_600i128);
 
-    client.cancel_vault(&vault_id);
+    client.cancel_vault(&vault_id, &owner);
     assert_eq!(token_client.balance(&owner), 1_000_000i128);
     assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Cancelled);
+}
+
+#[test]
+fn test_cancel_vault_requires_auth_before_load() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let other = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    // other is not the owner, should fail with NotOwner
+    assert!(client.try_cancel_vault(&vault_id, &other).is_err());
 }
 
 #[test]
@@ -448,7 +482,18 @@ fn test_partial_release_fails_if_insufficient_balance() {
 fn test_update_beneficiary_rejects_owner_as_beneficiary() {
     let (_, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &1000);
-    client.update_beneficiary(&vault_id, &owner);
+    client.update_beneficiary(&vault_id, &owner, &owner);
+}
+
+#[test]
+fn test_update_beneficiary_requires_auth_before_load() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let other = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000);
+    let new_beneficiary = Address::generate(&env);
+
+    // other is not the owner, should fail with NotOwner
+    assert!(client.try_update_beneficiary(&vault_id, &other, &new_beneficiary).is_err());
 }
 
 #[test]
@@ -839,6 +884,20 @@ fn test_partial_release_without_multi_beneficiary_sends_to_primary() {
 }
 
 #[test]
+fn test_partial_release_rejected_on_expired_vault() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    // Advance time past expiry
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    // partial_release should fail with VaultExpired
+    assert!(client.try_partial_release(&vault_id, &100i128).is_err());
+}
+
+#[test]
 fn test_update_beneficiary_updates_index() {
     let (env, owner, old_beneficiary, _, _, client) = setup();
     let new_beneficiary = Address::generate(&env);
@@ -849,7 +908,7 @@ fn test_update_beneficiary_updates_index() {
     assert_eq!(client.get_vaults_by_beneficiary(&old_beneficiary, &0u32, &10u32), vec![&env, vault_id]);
     assert_eq!(client.get_vaults_by_beneficiary(&new_beneficiary, &0u32, &10u32), vec![&env]);
 
-    client.update_beneficiary(&vault_id, &new_beneficiary);
+    client.update_beneficiary(&vault_id, &owner, &new_beneficiary);
 
     // old beneficiary no longer sees the vault
     assert_eq!(client.get_vaults_by_beneficiary(&old_beneficiary, &0u32, &10u32), vec![&env]);
