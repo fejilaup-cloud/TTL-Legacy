@@ -712,3 +712,79 @@ fn test_deposit_rejects_balance_overflow() {
 
     assert!(result.is_err(), "expected overflow error on deposit exceeding i128::MAX");
 }
+
+#[test]
+fn test_partial_release_with_multi_beneficiary_applies_bps_split() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let token_client = token::Client::new(&env, &token_address);
+
+    let beneficiary2 = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_address).mint(&owner, &1_000_000);
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64);
+    client.deposit(&vault_id, &owner, &10_000i128);
+
+    // 60/40 split
+    client.set_beneficiaries(
+        &vault_id,
+        &vec![
+            &env,
+            BeneficiaryEntry { address: beneficiary.clone(), bps: 6_000 },
+            BeneficiaryEntry { address: beneficiary2.clone(), bps: 4_000 },
+        ],
+    );
+
+    client.partial_release(&vault_id, &1_000i128);
+
+    // 60% of 1_000 = 600, 40% (last, absorbs dust) = 400
+    assert_eq!(token_client.balance(&beneficiary), 600i128);
+    assert_eq!(token_client.balance(&beneficiary2), 400i128);
+    assert_eq!(client.get_vault(&vault_id).balance, 9_000i128);
+    // vault remains locked
+    assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Locked);
+}
+
+#[test]
+fn test_partial_release_with_multi_beneficiary_last_entry_absorbs_dust() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let token_client = token::Client::new(&env, &token_address);
+
+    let beneficiary2 = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_address).mint(&owner, &1_000_000);
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64);
+    client.deposit(&vault_id, &owner, &10_000i128);
+
+    // 33/67 split — integer division leaves dust on the last entry
+    client.set_beneficiaries(
+        &vault_id,
+        &vec![
+            &env,
+            BeneficiaryEntry { address: beneficiary.clone(), bps: 3_300 },
+            BeneficiaryEntry { address: beneficiary2.clone(), bps: 6_700 },
+        ],
+    );
+
+    // release 100 stroops: 33% = 33, last gets 100 - 33 = 67
+    client.partial_release(&vault_id, &100i128);
+
+    assert_eq!(token_client.balance(&beneficiary), 33i128);
+    assert_eq!(token_client.balance(&beneficiary2), 67i128);
+    assert_eq!(client.get_vault(&vault_id).balance, 9_900i128);
+}
+
+#[test]
+fn test_partial_release_without_multi_beneficiary_sends_to_primary() {
+    // Regression: when beneficiaries list is empty, primary beneficiary still gets 100%
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let token_client = token::Client::new(&env, &token_address);
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    client.partial_release(&vault_id, &400i128);
+
+    assert_eq!(token_client.balance(&beneficiary), 400i128);
+    assert_eq!(client.get_vault(&vault_id).balance, 600i128);
+    assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Locked);
+}
