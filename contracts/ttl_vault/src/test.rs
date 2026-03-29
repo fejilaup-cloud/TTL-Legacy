@@ -856,3 +856,30 @@ fn test_update_beneficiary_updates_index() {
     // new beneficiary now sees the vault
     assert_eq!(client.get_vaults_by_beneficiary(&new_beneficiary, &0u32, &10u32), vec![&env, vault_id]);
 }
+
+
+#[test]
+fn test_update_check_in_interval_resets_last_check_in() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    let initial_check_in = client.get_vault(&vault_id).last_check_in;
+
+    // Advance time significantly
+    env.ledger().with_mut(|l| l.timestamp += 500);
+
+    // Update interval — should reset last_check_in to current timestamp
+    client.update_check_in_interval(&vault_id, &300u64);
+
+    let vault = client.get_vault(&vault_id);
+    let new_check_in = vault.last_check_in;
+
+    // last_check_in should be updated to the current timestamp
+    assert!(new_check_in > initial_check_in);
+    assert_eq!(new_check_in, initial_check_in + 500);
+
+    // Deadline should be recalculated from the new last_check_in
+    let deadline = new_check_in + vault.check_in_interval;
+    let now = env.ledger().timestamp();
+    assert_eq!(deadline - now, 300u64);
+}

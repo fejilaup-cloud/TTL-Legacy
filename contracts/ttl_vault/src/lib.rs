@@ -938,6 +938,7 @@ impl TtlVaultContract {
             return Err(ContractError::AlreadyReleased);
         }
         vault.check_in_interval = new_interval;
+        vault.last_check_in = env.ledger().timestamp();
         Self::save_vault(&env, vault_id, &vault);
         // Explicitly re-extend the vault's persistent TTL using the new (potentially
         // longer) interval so storage outlives the updated check-in deadline.
