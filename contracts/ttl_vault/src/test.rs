@@ -1249,3 +1249,30 @@ fn test_create_vault_assigns_sequential_ids() {
     assert_eq!(id1, 1, "first vault must have id 1");
     assert_eq!(id2, 2, "second vault must have id 2 (sequential, no duplicate assignment)");
 }
+
+// Regression tests for #99: assert_interval_in_bounds must return structured
+// error codes 14 (IntervalTooLow) and 15 (IntervalTooHigh) instead of failing
+// to compile due to missing ContractError variants.
+#[test]
+fn test_create_vault_returns_interval_too_low_error() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    client.set_min_check_in_interval(&3_600u64);
+
+    let err = client
+        .try_create_vault(&owner, &beneficiary, &100u64)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(14));
+}
+
+#[test]
+fn test_create_vault_returns_interval_too_high_error() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    client.set_max_check_in_interval(&1_000u64);
+
+    let err = client
+        .try_create_vault(&owner, &beneficiary, &2_000u64)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(15));
+}
