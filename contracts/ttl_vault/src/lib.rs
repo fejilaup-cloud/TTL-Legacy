@@ -86,7 +86,7 @@ impl TtlVaultContract {
             panic_with_error!(&env, ContractError::AlreadyInitialized);
         }
         if xlm_token == admin {
-            panic_with_error!(&env, ContractError::InvalidAdmin);
+            panic_with_error!(&env, ContractError::BalanceOverflow);
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::TokenAddress, &xlm_token);
@@ -461,32 +461,35 @@ impl TtlVaultContract {
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
     /// * `ContractError::InsufficientBalance` - If vault balance is less than amount
-    pub fn withdraw(env: Env, vault_id: u64, amount: i128) -> Result<(), ContractError> {
-        if Self::load_paused(&env) {
-            return Err(ContractError::Paused);
+    pub fn withdraw(env: Env, vault_id: u64, caller: Address, amount: i128) -> Result<(), ContractError> {
+            if Self::load_paused(&env) {
+                return Err(ContractError::Paused);
+            }
+            if amount <= 0 {
+                return Err(ContractError::InvalidAmount);
+            }
+            caller.require_auth();
+            let mut vault = Self::load_vault(&env, vault_id);
+            if caller != vault.owner {
+                return Err(ContractError::NotOwner);
+            }
+            if vault.status != ReleaseStatus::Locked {
+                return Err(ContractError::AlreadyReleased);
+            }
+            if vault.balance < amount {
+                return Err(ContractError::InsufficientBalance);
+            }
+            let xlm = token::Client::new(&env, &Self::load_token(&env));
+            xlm.transfer(&env.current_contract_address(), &vault.owner, &amount);
+            vault.balance -= amount;
+            Self::save_vault(&env, vault_id, &vault);
+            env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+            env.events().publish(
+                (WITHDRAW_TOPIC, vault_id),
+                (amount, vault.balance),
+            );
+            Ok(())
         }
-        if amount <= 0 {
-            return Err(ContractError::InvalidAmount);
-        }
-        let mut vault = Self::load_vault(&env, vault_id);
-        vault.owner.require_auth();
-        if vault.status != ReleaseStatus::Locked {
-            return Err(ContractError::AlreadyReleased);
-        }
-        if vault.balance < amount {
-            return Err(ContractError::InsufficientBalance);
-        }
-        let xlm = token::Client::new(&env, &Self::load_token(&env));
-        xlm.transfer(&env.current_contract_address(), &vault.owner, &amount);
-        vault.balance -= amount;
-        Self::save_vault(&env, vault_id, &vault);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events().publish(
-            (WITHDRAW_TOPIC, vault_id),
-            (amount, vault.balance),
-        );
-        Ok(())
-    }
 
     /// Triggers the release of funds to beneficiaries after the vault expires.
     ///
@@ -668,29 +671,33 @@ impl TtlVaultContract {
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
     /// * `ContractError::InvalidBps` - If BPS sum is not 10,000
     pub fn set_beneficiaries(
-        env: Env,
-        vault_id: u64,
-        beneficiaries: Vec<BeneficiaryEntry>,
-    ) -> Result<(), ContractError> {
-        let mut vault = Self::load_vault(&env, vault_id);
-        vault.owner.require_auth();
-        if vault.status != ReleaseStatus::Locked {
-            return Err(ContractError::AlreadyReleased);
-        }
-        let total_bps: u32 = beneficiaries.iter().map(|e| e.bps).sum();
-        if total_bps != 10_000 {
-            return Err(ContractError::InvalidBps);
-        }
-        for entry in beneficiaries.iter() {
-            if entry.address == vault.owner {
-                return Err(ContractError::InvalidBeneficiary);
+            env: Env,
+            vault_id: u64,
+            caller: Address,
+            beneficiaries: Vec<BeneficiaryEntry>,
+        ) -> Result<(), ContractError> {
+            caller.require_auth();
+            let mut vault = Self::load_vault(&env, vault_id);
+            if caller != vault.owner {
+                return Err(ContractError::NotOwner);
             }
+            if vault.status != ReleaseStatus::Locked {
+                return Err(ContractError::AlreadyReleased);
+            }
+            let total_bps: u32 = beneficiaries.iter().map(|e| e.bps).sum();
+            if total_bps != 10_000 {
+                return Err(ContractError::InvalidBps);
+            }
+            for entry in beneficiaries.iter() {
+                if entry.address == vault.owner {
+                    return Err(ContractError::InvalidBeneficiary);
+                }
+            }
+            vault.beneficiaries = beneficiaries;
+            Self::save_vault(&env, vault_id, &vault);
+            env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+            Ok(())
         }
-        vault.beneficiaries = beneficiaries;
-        Self::save_vault(&env, vault_id, &vault);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        Ok(())
-    }
 
     // --- Task 4: update_metadata ---
 
@@ -709,17 +716,20 @@ impl TtlVaultContract {
     /// # Errors
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
-    pub fn update_metadata(env: Env, vault_id: u64, metadata: String) -> Result<(), ContractError> {
-        let mut vault = Self::load_vault(&env, vault_id);
-        vault.owner.require_auth();
-        if vault.status != ReleaseStatus::Locked {
-            return Err(ContractError::AlreadyReleased);
+    pub fn update_metadata(env: Env, vault_id: u64, caller: Address, metadata: String) -> Result<(), ContractError> {
+            caller.require_auth();
+            let mut vault = Self::load_vault(&env, vault_id);
+            if caller != vault.owner {
+                return Err(ContractError::NotOwner);
+            }
+            if vault.status != ReleaseStatus::Locked {
+                return Err(ContractError::AlreadyReleased);
+            }
+            vault.metadata = metadata;
+            Self::save_vault(&env, vault_id, &vault);
+            env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+            Ok(())
         }
-        vault.metadata = metadata;
-        Self::save_vault(&env, vault_id, &vault);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        Ok(())
-    }
 
     // --- views ---
 
@@ -995,35 +1005,38 @@ impl TtlVaultContract {
     /// * `ContractError::Paused` - If the contract is paused
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
     pub fn transfer_ownership(
-        env: Env,
-        vault_id: u64,
-        new_owner: Address,
-    ) -> Result<(), ContractError> {
-        if Self::load_paused(&env) {
-            return Err(ContractError::Paused);
+            env: Env,
+            vault_id: u64,
+            caller: Address,
+            new_owner: Address,
+        ) -> Result<(), ContractError> {
+            if Self::load_paused(&env) {
+                return Err(ContractError::Paused);
+            }
+            caller.require_auth();
+            let mut vault = Self::load_vault(&env, vault_id);
+            let old_owner = vault.owner.clone();
+            if caller != old_owner {
+                return Err(ContractError::NotOwner);
+            }
+            if vault.status != ReleaseStatus::Locked {
+                return Err(ContractError::AlreadyReleased);
+            }
+            // Invariant: owner and beneficiary must always be distinct addresses.
+            // BeneficiaryVaults index does not need updating here because the vault's
+            // beneficiary field is not changed by an ownership transfer.
+            if new_owner == vault.beneficiary {
+                return Err(ContractError::InvalidBeneficiary);
+            }
+            if old_owner != new_owner {
+                Self::remove_owner_vault_id(&env, &old_owner, vault_id);
+                Self::add_owner_vault_id(&env, &new_owner, vault_id);
+            }
+            vault.owner = new_owner.clone();
+            Self::save_vault(&env, vault_id, &vault);
+            env.events().publish((OWNERSHIP_TOPIC, vault_id), (old_owner, new_owner));
+            Ok(())
         }
-        let mut vault = Self::load_vault(&env, vault_id);
-        let old_owner = vault.owner.clone();
-        old_owner.require_auth();
-        new_owner.require_auth();
-        if vault.status != ReleaseStatus::Locked {
-            return Err(ContractError::AlreadyReleased);
-        }
-        // Invariant: owner and beneficiary must always be distinct addresses.
-        // BeneficiaryVaults index does not need updating here because the vault's
-        // beneficiary field is not changed by an ownership transfer.
-        if new_owner == vault.beneficiary {
-            return Err(ContractError::InvalidBeneficiary);
-        }
-        if old_owner != new_owner {
-            Self::remove_owner_vault_id(&env, &old_owner, vault_id);
-            Self::add_owner_vault_id(&env, &new_owner, vault_id);
-        }
-        vault.owner = new_owner.clone();
-        Self::save_vault(&env, vault_id, &vault);
-        env.events().publish((OWNERSHIP_TOPIC, vault_id), (old_owner, new_owner));
-        Ok(())
-    }
 
     // --- helpers ---
 

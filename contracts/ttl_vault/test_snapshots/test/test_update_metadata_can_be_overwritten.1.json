@@ -108,6 +108,9 @@
                   "u64": 1
                 },
                 {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                },
+                {
                   "string": "v1"
                 }
               ]
@@ -128,6 +131,9 @@
               "args": [
                 {
                   "u64": 1
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
                 },
                 {
                   "string": "v2"
@@ -1261,6 +1267,9 @@
                   "u64": 1
                 },
                 {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                },
+                {
                   "string": "v1"
                 }
               ]
@@ -1313,6 +1322,9 @@
               "vec": [
                 {
                   "u64": 1
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
                 },
                 {
                   "string": "v2"
