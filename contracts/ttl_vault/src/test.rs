@@ -1229,3 +1229,42 @@ fn test_withdraw_succeeds_when_beneficiaries_are_set() {
     assert_eq!(token_client.balance(&beneficiary), 0i128);
     assert_eq!(token_client.balance(&b2), 0i128);
 }
+
+// ---- Issue #235: trigger_release with multi-beneficiary BPS split ----
+
+#[test]
+fn test_trigger_release_multi_beneficiary_bps_split_distributes_correctly() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let token_client = token::Client::new(&env, &token_address);
+
+    let b2 = Address::generate(&env);
+    let b3 = Address::generate(&env);
+
+    // 10_000 stroops deposited; 50/30/20 BPS split
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &10_000i128);
+
+    client.set_beneficiaries(
+        &vault_id,
+        &owner,
+        &vec![
+            &env,
+            BeneficiaryEntry { address: beneficiary.clone(), bps: 5_000 },
+            BeneficiaryEntry { address: b2.clone(), bps: 3_000 },
+            BeneficiaryEntry { address: b3.clone(), bps: 2_000 },
+        ],
+    );
+
+    // expire and release
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.trigger_release(&vault_id);
+
+    // 50% of 10_000 = 5_000; 30% = 3_000; last entry absorbs remainder = 2_000
+    assert_eq!(token_client.balance(&beneficiary), 5_000i128);
+    assert_eq!(token_client.balance(&b2), 3_000i128);
+    assert_eq!(token_client.balance(&b3), 2_000i128);
+
+    // vault balance drained to zero — no dust remains
+    assert_eq!(client.get_vault(&vault_id).balance, 0i128);
+    assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Released);
+}
