@@ -1133,3 +1133,35 @@ fn test_withdraw_rejected_on_released_vault() {
         .unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(7));
 }
+
+// Regression test: trigger_release must be idempotent — a second call on an
+// already-released vault must fail with ContractError::AlreadyReleased (#7),
+// leave the beneficiary balance unchanged, and keep the vault in Released state.
+#[test]
+fn test_trigger_release_cannot_be_called_twice() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &500i128);
+
+    // expire the vault
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    // first call — must succeed and transfer funds
+    client.trigger_release(&vault_id);
+
+    let token_client = token::Client::new(&env, &token_address);
+    let balance_after_first = token_client.balance(&beneficiary);
+    assert_eq!(balance_after_first, 500i128);
+    assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Released);
+
+    // second call — must fail with AlreadyReleased (error code 7)
+    let err = client.try_trigger_release(&vault_id).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(7));
+
+    // beneficiary balance must be unchanged
+    assert_eq!(token_client.balance(&beneficiary), balance_after_first);
+
+    // vault must still be marked Released
+    assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Released);
+}
