@@ -1230,7 +1230,13 @@ impl TtlVaultContract {
                 next_ids.push_back(id);
             }
         }
-        Self::save_owner_vault_ids(env, owner, &next_ids);
+        // Save updated list or delete key if empty to save storage rent
+        if next_ids.is_empty() {
+            let key = DataKey::OwnerVaults(owner.clone());
+            env.storage().persistent().remove(&key);
+        } else {
+            Self::save_owner_vault_ids(env, owner, &next_ids);
+        }
     }
 
     fn save_vault(env: &Env, vault_id: u64, vault: &Vault) {
@@ -1267,7 +1273,13 @@ impl TtlVaultContract {
                 next_ids.push_back(id);
             }
         }
-        Self::save_beneficiary_vault_ids(env, beneficiary, &next_ids);
+        // Save updated list or delete key if empty to save storage rent
+        if next_ids.is_empty() {
+            let key = DataKey::BeneficiaryVaults(beneficiary.clone());
+            env.storage().persistent().remove(&key);
+        } else {
+            Self::save_beneficiary_vault_ids(env, beneficiary, &next_ids);
+        }
     }
 
     fn assert_interval_in_bounds(env: &Env, interval: u64) {

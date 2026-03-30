@@ -1133,3 +1133,27 @@ fn test_withdraw_rejected_on_released_vault() {
         .unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(7));
 }
+
+#[test]
+fn test_beneficiary_index_sync() {
+    let (env, owner, user_a, _, _, client) = setup();
+    let user_b = Address::generate(&env);
+
+    // Create a vault with user_a as beneficiary
+    let vault_id = client.create_vault(&owner, &user_a, &100u64);
+
+    // Verify get_vaults_by_beneficiary(user_a) contains the ID
+    assert_eq!(client.get_vaults_by_beneficiary(&user_a, &None, &0u32, &10u32), vec![&env, vault_id]);
+
+    // Verify get_vaults_by_beneficiary(user_b) does not contain the ID
+    assert_eq!(client.get_vaults_by_beneficiary(&user_b, &None, &0u32, &10u32), vec![&env]);
+
+    // Call update_beneficiary to transfer from user_a to user_b
+    client.update_beneficiary(&vault_id, &owner, &user_b);
+
+    // Assert: get_vaults_by_beneficiary(user_a) is now empty or does not contain the ID
+    assert_eq!(client.get_vaults_by_beneficiary(&user_a, &None, &0u32, &10u32), vec![&env]);
+
+    // Assert: get_vaults_by_beneficiary(user_b) now contains the ID
+    assert_eq!(client.get_vaults_by_beneficiary(&user_b, &None, &0u32, &10u32), vec![&env, vault_id]);
+}
