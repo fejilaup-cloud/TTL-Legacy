@@ -41,17 +41,23 @@ fn setup() -> (
 // ---- existing tests ----
 
 #[test]
-#[should_panic(expected = "Error(Contract, #1)")]
 fn test_initialize_guard_against_double_init() {
     let (env, _, _, admin, token_address, client) = setup();
 
+    let original_admin = client.get_admin();
+    let original_token = client.get_token();
+
+    let new_admin = Address::generate(&env);
     let new_token_admin = Address::generate(&env);
     let new_token_address = env
         .register_stellar_asset_contract_v2(new_token_admin)
         .address();
 
-    client.initialize(&new_token_address, &admin);
-    let _ = token_address;
+    let err = client.try_initialize(&new_token_address, &new_admin).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(1));
+
+    assert_eq!(client.get_admin(), original_admin);
+    assert_eq!(client.get_token(), original_token);
 }
 
 #[test]
