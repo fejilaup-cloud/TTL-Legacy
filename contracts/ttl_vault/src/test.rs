@@ -85,6 +85,16 @@ fn test_vault_count_view() {
 }
 
 #[test]
+fn test_vault_count_not_incremented_on_failed_create() {
+    let (env, owner, _beneficiary, _, _, client) = setup();
+
+    assert_eq!(client.vault_count(), 0);
+
+    assert!(client.try_create_vault(&owner, &owner, &100u64).is_err()); // InvalidBeneficiary must not mutate count
+    assert_eq!(client.vault_count(), 0);
+}
+
+#[test]
 fn test_vault_exists_for_existing_and_missing_ids() {
     let (_, owner, beneficiary, _, _, client) = setup();
 
@@ -853,7 +863,7 @@ fn test_set_beneficiaries_rejects_invalid_bps() {
         )
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, soroban_sdk::Error::from_contract_error(12));
+    assert_eq!(err, ContractError::InvalidBps);
 }
 
 // ---- Issue #105: set_beneficiaries owner-as-beneficiary guard ----
