@@ -709,7 +709,8 @@ fn test_set_and_get_max_check_in_interval() {
 fn test_create_vault_fails_when_interval_exceeds_max() {
     let (_, owner, beneficiary, _, _, client) = setup();
     client.set_max_check_in_interval(&1_000u64);
-    assert!(client.try_create_vault(&owner, &beneficiary, &2_000u64).is_err());
+    let result = client.try_create_vault(&owner, &beneficiary, &2_000u64);
+    assert_eq!(result, Err(soroban_sdk::Error::from_contract_error(ContractError::IntervalTooHigh)));
 }
 
 #[test]
@@ -725,7 +726,8 @@ fn test_update_check_in_interval_fails_when_exceeds_max() {
     let (_, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
     client.set_max_check_in_interval(&500u64);
-    assert!(client.try_update_check_in_interval(&vault_id, &600u64).is_err());
+    let result = client.try_update_check_in_interval(&vault_id, &600u64);
+    assert_eq!(result, Err(soroban_sdk::Error::from_contract_error(ContractError::IntervalTooHigh)));
 }
 
 // ---- Issue 4: min_check_in_interval ----
@@ -742,7 +744,8 @@ fn test_set_and_get_min_check_in_interval() {
 fn test_create_vault_fails_when_interval_below_min() {
     let (_, owner, beneficiary, _, _, client) = setup();
     client.set_min_check_in_interval(&3_600u64);
-    assert!(client.try_create_vault(&owner, &beneficiary, &100u64).is_err());
+    let result = client.try_create_vault(&owner, &beneficiary, &100u64);
+    assert_eq!(result, Err(soroban_sdk::Error::from_contract_error(ContractError::IntervalTooLow)));
 }
 
 #[test]
@@ -758,7 +761,8 @@ fn test_update_check_in_interval_fails_when_below_min() {
     let (_, owner, beneficiary, _, _, client) = setup();
     client.set_min_check_in_interval(&3_600u64);
     let vault_id = client.create_vault(&owner, &beneficiary, &3_600u64);
-    assert!(client.try_update_check_in_interval(&vault_id, &100u64).is_err());
+    let result = client.try_update_check_in_interval(&vault_id, &100u64);
+    assert_eq!(result, Err(soroban_sdk::Error::from_contract_error(ContractError::IntervalTooLow)));
 }
 
 #[test]
