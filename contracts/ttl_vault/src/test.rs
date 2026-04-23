@@ -1299,3 +1299,102 @@ fn test_withdraw_rejected_on_released_vault() {
         .unwrap();
     assert_eq!(err, ContractError::AlreadyReleased);
 }
+
+#[test]
+fn test_get_vaults_by_beneficiary_with_status_filter() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    // Create two vaults
+    let vault_id_1 = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id_1, &owner, &1_000);
+
+    let vault_id_2 = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id_2, &owner, &1_000);
+
+    // Expire and release vault_id_1
+    env.ledger().with_mut(|l| l.timestamp += 101);
+    client.trigger_release(&vault_id_1);
+
+    // Now we have:
+    // vault_id_1: Released
+    // vault_id_2: Locked
+
+    // Test: Get only Locked vaults
+    assert_eq!(
+        client.get_vaults_by_beneficiary(&beneficiary, &Some(ReleaseStatus::Locked), &0u32, &10u32),
+        vec![&env, vault_id_2]
+    );
+
+    // Test: Get only Released vaults
+    assert_eq!(
+        client.get_vaults_by_beneficiary(&beneficiary, &Some(ReleaseStatus::Released), &0u32, &10u32),
+        vec![&env, vault_id_1]
+    );
+
+    // Test: Get all vaults (no filter)
+    assert_eq!(
+        client.get_vaults_by_beneficiary(&beneficiary, &None, &0u32, &10u32),
+        vec![&env, vault_id_1, vault_id_2]
+    );
+}
+
+#[test]
+fn test_get_vaults_by_owner_with_status_filter() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    // Create two vaults
+    let vault_id_1 = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id_1, &owner, &1_000);
+
+    let vault_id_2 = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id_2, &owner, &1_000);
+
+    // Expire and release vault_id_1
+    env.ledger().with_mut(|l| l.timestamp += 101);
+    client.trigger_release(&vault_id_1);
+
+    // Now we have:
+    // vault_id_1: Released
+    // vault_id_2: Locked
+
+    // Test: Get only Locked vaults
+    assert_eq!(
+        client.get_vaults_by_owner(&owner, &Some(ReleaseStatus::Locked), &0u32, &10u32),
+        vec![&env, vault_id_2]
+    );
+
+    // Test: Get only Released vaults
+    assert_eq!(
+        client.get_vaults_by_owner(&owner, &Some(ReleaseStatus::Released), &0u32, &10u32),
+        vec![&env, vault_id_1]
+    );
+
+    // Test: Get all vaults (no filter)
+    assert_eq!(
+        client.get_vaults_by_owner(&owner, &None, &0u32, &10u32),
+        vec![&env, vault_id_1, vault_id_2]
+    );
+}
+
+#[test]
+fn test_get_vaults_by_owner_with_cancelled_status_filter() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    // Create a vault
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    // Cancel the vault (removes it from owner index)
+    client.cancel_vault(&vault_id, &owner);
+
+    // Cancelled vaults are removed from the index, so filtering for Cancelled returns empty
+    assert_eq!(
+        client.get_vaults_by_owner(&owner, &Some(ReleaseStatus::Cancelled), &0u32, &10u32),
+        vec![&env]
+    );
+
+    // All vaults (no filter) also returns empty since it was removed
+    assert_eq!(
+        client.get_vaults_by_owner(&owner, &None, &0u32, &10u32),
+        vec![&env]
+    );
+}
