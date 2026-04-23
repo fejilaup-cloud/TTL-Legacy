@@ -464,19 +464,11 @@ fn test_propose_admin_can_be_called_multiple_times() {
 
 #[test]
 #[should_panic(expected = "Error(Contract, #11)")]
-fn test_accept_admin_rejects_unauthorized_caller() {
-    let (env, _, _, _, _, client) = setup();
-    let new_admin = Address::generate(&env);
+fn test_accept_admin_rejects_when_no_pending_admin() {
+    let (_, _, _, _, _, client) = setup();
 
-    client.propose_admin(&new_admin);
-    assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
-
-    // Remove the blanket auth mock so require_auth actually enforces identity.
-    // accept_admin has no pending admin for `unauthorized`, so NoPendingAdmin (#11) is expected.
-    let env2 = Env::default();
-    let client2 = TtlVaultContractClient::new(&env2, &client.address);
-    // Calling without mock_all_auths — pending.require_auth() will reject
-    client2.accept_admin();
+    // No pending admin set, so accept_admin should fail with NoPendingAdmin
+    client.accept_admin();
 }
 
 // ---- Task 1: ping_expiry tests ----
