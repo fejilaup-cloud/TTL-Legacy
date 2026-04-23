@@ -619,6 +619,24 @@ fn test_deposit_into_expired_vault_returns_vault_expired_error() {
 }
 
 #[test]
+fn test_deposit_rejects_zero_amount() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    let err = client.try_deposit(&vault_id, &owner, &0i128).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(5));
+}
+
+#[test]
+fn test_deposit_rejects_negative_amount() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    let err = client.try_deposit(&vault_id, &owner, &-1i128).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(5));
+}
+
+#[test]
 fn test_update_metadata_can_be_overwritten() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
