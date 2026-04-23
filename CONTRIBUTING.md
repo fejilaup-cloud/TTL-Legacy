@@ -35,3 +35,4 @@ Report vulnerabilities via [Security Policy](SECURITY.md).
 ## License
 
 Contributions are licensed under MIT License.
+

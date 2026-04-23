@@ -97,6 +97,21 @@ fn test_vault_count_not_incremented_on_failed_create() {
 }
 
 #[test]
+fn test_vault_count_is_consistent_after_create() {
+    let (_env, owner, beneficiary, _, _, client) = setup();
+
+    assert_eq!(client.vault_count(), 0);
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    assert_eq!(vault_id, 1);
+    assert_eq!(client.vault_count(), vault_id);
+
+    let vault_id_2 = client.create_vault(&owner, &beneficiary, &200u64);
+    assert_eq!(vault_id_2, 2);
+    assert_eq!(client.vault_count(), vault_id_2);
+}
+
+#[test]
 fn test_vault_exists_for_existing_and_missing_ids() {
     let (_, owner, beneficiary, _, _, client) = setup();
 

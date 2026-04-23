@@ -319,8 +319,7 @@ impl TtlVaultContract {
             panic_with_error!(&env, ContractError::InvalidBeneficiary);
         }
 
-        let next_vault_count = Self::vault_count(env.clone()) + 1;
-        let vault_id = next_vault_count;
+        let vault_id = Self::vault_count(env.clone()) + 1;
         let timestamp = env.ledger().timestamp();
         let vault = Vault {
             owner: owner.clone(),
@@ -337,7 +336,7 @@ impl TtlVaultContract {
         Self::add_owner_vault_id(&env, &owner, vault_id);
         Self::add_beneficiary_vault_id(&env, &beneficiary, vault_id);
         // VaultCount is an incrementing generation ID and must be updated
-        // atomically with successful vault persistence.
+        // only after the vault and its owner/beneficiary indexes are persisted.
         //
         // Ordering guarantee:
         //  1) Compute next ID from current vault count
@@ -347,7 +346,7 @@ impl TtlVaultContract {
         // panics, VaultCount remains unchanged and consumers cannot observe
         // a hole in the sequence.
         let key = DataKey::VaultCount;
-        env.storage().persistent().set(&key, &next_vault_count);
+        env.storage().persistent().set(&key, &vault_id);
         env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish(
