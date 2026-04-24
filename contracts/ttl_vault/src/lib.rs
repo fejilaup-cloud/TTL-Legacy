@@ -557,6 +557,133 @@ impl TtlVaultContract {
             Ok(())
         }
 
+    // --- Issue #318: batch_withdraw ---
+
+    /// Withdraws from multiple vaults owned by the same caller in a single transaction.
+    ///
+    /// This is more efficient than calling `withdraw` multiple times as it reduces
+    /// transaction overhead. All vault_ids and amounts are validated before any
+    /// state mutation occurs.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_ids` - Vector of vault IDs to withdraw from
+    /// * `amounts` - Vector of amounts (in stroops) to withdraw from each vault
+    /// * `caller` - The address of the caller (must be the owner of all vaults)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::Paused` - If the contract is paused
+    /// * `ContractError::InvalidAmount` - If vault_ids.len() != amounts.len() or any amount is not positive
+    /// * `ContractError::VaultNotFound` - If any vault does not exist
+    /// * `ContractError::NotOwner` - If caller is not the owner of any vault
+    /// * `ContractError::AlreadyReleased` - If any vault is not in Locked status
+    /// * `ContractError::InsufficientBalance` - If any vault balance is less than the requested amount
+    pub fn batch_withdraw(
+        env: Env,
+        vault_ids: Vec<u64>,
+        amounts: Vec<i128>,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+        if vault_ids.len() != amounts.len() {
+            return Err(ContractError::InvalidAmount);
+        }
+        caller.require_auth();
+
+        // Validate all entries before mutating state
+        for (vault_id, amount) in vault_ids.iter().zip(amounts.iter()) {
+            if amount <= 0 {
+                return Err(ContractError::InvalidAmount);
+            }
+            let vault = Self::try_load_vault(&env, vault_id)
+                .ok_or(ContractError::VaultNotFound)?;
+            if caller != vault.owner {
+                return Err(ContractError::NotOwner);
+            }
+            if vault.status != ReleaseStatus::Locked {
+                return Err(ContractError::AlreadyReleased);
+            }
+            if vault.balance < amount {
+                return Err(ContractError::InsufficientBalance);
+            }
+        }
+
+        // All validations passed — apply withdrawals
+        let xlm = token::Client::new(&env, &Self::load_token(&env));
+        for (vault_id, amount) in vault_ids.iter().zip(amounts.iter()) {
+            let mut vault = Self::load_vault(&env, vault_id);
+            xlm.transfer(&env.current_contract_address(), &vault.owner, &amount);
+            vault.balance -= amount;
+            let remaining = vault.balance;
+            Self::save_vault(&env, vault_id, &vault);
+            env.events().publish(
+                (WITHDRAW_TOPIC, vault_id),
+                (amount, remaining),
+            );
+        }
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(())
+    }
+
+    // --- Issue #319: batch_check_in ---
+
+    /// Records check-ins for multiple vaults owned by the same caller in a single transaction.
+    ///
+    /// This is more efficient than calling `check_in` multiple times as it reduces
+    /// transaction overhead. All vaults are validated before any state mutation occurs.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_ids` - Vector of vault IDs to check in
+    /// * `caller` - The address of the caller (must be the owner of all vaults)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::Paused` - If the contract is paused
+    /// * `ContractError::VaultNotFound` - If any vault does not exist
+    /// * `ContractError::NotOwner` - If caller is not the owner of any vault
+    /// * `ContractError::AlreadyReleased` - If any vault is not in Locked status
+    pub fn batch_check_in(
+        env: Env,
+        vault_ids: Vec<u64>,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+        caller.require_auth();
+
+        // Validate all entries before mutating state
+        for vault_id in vault_ids.iter() {
+            let vault = Self::try_load_vault(&env, vault_id)
+                .ok_or(ContractError::VaultNotFound)?;
+            if caller != vault.owner {
+                return Err(ContractError::NotOwner);
+            }
+            if vault.status != ReleaseStatus::Locked {
+                return Err(ContractError::AlreadyReleased);
+            }
+        }
+
+        // All validations passed — apply check-ins
+        let now = env.ledger().timestamp();
+        for vault_id in vault_ids.iter() {
+            let mut vault = Self::load_vault(&env, vault_id);
+            vault.last_check_in = now;
+            Self::save_vault(&env, vault_id, &vault);
+            env.events().publish((CHECK_IN_TOPIC, vault_id), now);
+        }
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(())
+    }
+
     /// Triggers the release of funds to beneficiaries after the vault expires.
     ///
     /// Anyone can call this function once the vault's TTL has lapsed. The funds
