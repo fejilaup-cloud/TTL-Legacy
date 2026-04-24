@@ -531,6 +531,13 @@ fn test_ping_expiry_returns_zero_when_expired() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_ping_expiry_panics_for_nonexistent_vault() {
+    let (_, _, _, _, _, client) = setup();
+    client.ping_expiry(&9999u64);
+}
+
+#[test]
 fn test_get_ttl_remaining_returns_none_when_expired() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
