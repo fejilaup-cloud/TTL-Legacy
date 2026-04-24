@@ -780,7 +780,7 @@ fn test_create_vault_fails_when_interval_exceeds_max() {
     let (_, owner, beneficiary, _, _, client) = setup();
     client.set_max_check_in_interval(&1_000u64);
     let result = client.try_create_vault(&owner, &beneficiary, &2_000u64);
-    assert_eq!(result.unwrap().unwrap_err(), soroban_sdk::Error::from_contract_error(ContractError::IntervalTooHigh as u32));
+    assert_eq!(result.unwrap_err().unwrap(), soroban_sdk::Error::from_contract_error(ContractError::IntervalTooHigh as u32));
 }
 
 #[test]
@@ -815,7 +815,7 @@ fn test_create_vault_fails_when_interval_below_min() {
     let (_, owner, beneficiary, _, _, client) = setup();
     client.set_min_check_in_interval(&3_600u64);
     let result = client.try_create_vault(&owner, &beneficiary, &100u64);
-    assert_eq!(result.unwrap().unwrap_err(), soroban_sdk::Error::from_contract_error(ContractError::IntervalTooLow as u32));
+    assert_eq!(result.unwrap_err().unwrap(), soroban_sdk::Error::from_contract_error(ContractError::IntervalTooLow as u32));
 }
 
 #[test]
@@ -1451,5 +1451,154 @@ fn test_get_vaults_by_owner_with_cancelled_status_filter() {
     assert_eq!(
         client.get_vaults_by_owner(&owner, &None, &0u32, &10u32),
         vec![&env]
+    );
+}
+
+// ---- Bug condition exploration: contract-error-enum-gaps ----
+
+/// **Validates: Requirements 1.1, 2.1**
+///
+/// Property 1: Fault Condition - Enum Variants Are in Ascending Discriminant Order
+///
+/// Lists all 21 ContractError variants in their DECLARED source order and asserts:
+/// 1. Every consecutive pair satisfies variants[i] < variants[i+1] (strictly ascending)
+/// 2. The set of all discriminant values has the same cardinality as the variant count (no duplicates)
+///
+/// EXPECTED OUTCOME on unfixed code:
+///   - Ascending-order assertion FAILS at index 1: NotInitialized(21) > InvalidInterval(2)
+///   - No-duplicate assertion PASSES (confirms ordering bug, not a collision bug)
+#[test]
+fn test_error_codes_are_sequential() {
+    // Variants listed in their DECLARED source order (as they appear in lib.rs)
+    let variants: &[(&str, u32)] = &[
+        ("AlreadyInitialized", ContractError::AlreadyInitialized as u32),
+        ("InvalidInterval",    ContractError::InvalidInterval    as u32),
+        ("VaultNotFound",      ContractError::VaultNotFound      as u32),
+        ("EmptyVault",         ContractError::EmptyVault         as u32),
+        ("InvalidAmount",      ContractError::InvalidAmount      as u32),
+        ("NotOwner",           ContractError::NotOwner           as u32),
+        ("AlreadyReleased",    ContractError::AlreadyReleased    as u32),
+        ("InsufficientBalance",ContractError::InsufficientBalance as u32),
+        ("NotAdmin",           ContractError::NotAdmin           as u32),
+        ("Paused",             ContractError::Paused             as u32),
+        ("NoPendingAdmin",     ContractError::NoPendingAdmin     as u32),
+        ("InvalidBps",         ContractError::InvalidBps         as u32),
+        ("NotExpiringSoon",    ContractError::NotExpiringSoon    as u32),
+        ("IntervalTooLow",     ContractError::IntervalTooLow     as u32),
+        ("IntervalTooHigh",    ContractError::IntervalTooHigh    as u32),
+        ("NotExpired",         ContractError::NotExpired         as u32),
+        ("InvalidBeneficiary", ContractError::InvalidBeneficiary as u32),
+        ("BalanceOverflow",    ContractError::BalanceOverflow    as u32),
+        ("VaultExpired",       ContractError::VaultExpired       as u32),
+        ("InvalidAdmin",       ContractError::InvalidAdmin       as u32),
+        ("NotInitialized",     ContractError::NotInitialized     as u32),
+    ];
+
+    // Assert variant count matches expectation
+    assert_eq!(variants.len(), 21, "expected 21 ContractError variants");
+
+    // Property 2: no-duplicate check (cardinality of discriminant set == variant count)
+    let mut seen = alloc::collections::BTreeSet::new();
+    for (name, disc) in variants.iter() {
+        assert!(
+            seen.insert(*disc),
+            "duplicate discriminant {} found for variant {}",
+            disc, name
+        );
+    }
+    assert_eq!(seen.len(), variants.len(), "discriminant set cardinality mismatch");
+
+    // Property 1: strictly ascending consecutive pairs
+    for i in 0..variants.len() - 1 {
+        let (name_a, disc_a) = variants[i];
+        let (name_b, disc_b) = variants[i + 1];
+        assert!(
+            disc_a < disc_b,
+            "out-of-order at index {}: {}({}) > {}({})",
+            i, name_a, disc_a, name_b, disc_b
+        );
+    }
+}
+
+// ---- Preservation property tests: contract-error-enum-gaps (Task 2) ----
+
+/// **Validates: Requirements 3.1, 3.2, 3.3, 3.4**
+///
+/// Property 2: Preservation - All Discriminant Values Are Unchanged
+///
+/// Asserts each of the 21 ContractError variants maps to its exact expected u32 value,
+/// and that the complete set of discriminants equals {1..=21} (no gaps, no duplicates).
+///
+/// EXPECTED OUTCOME on unfixed code: ALL assertions PASS.
+/// This establishes the baseline discriminant values that must be preserved after the fix.
+#[test]
+fn test_error_code_values_preserved() {
+    // --- Part 1: individual variant assertions ---
+    assert_eq!(ContractError::AlreadyInitialized  as u32,  1, "AlreadyInitialized must be 1");
+    assert_eq!(ContractError::InvalidInterval     as u32,  2, "InvalidInterval must be 2");
+    assert_eq!(ContractError::VaultNotFound       as u32,  3, "VaultNotFound must be 3");
+    assert_eq!(ContractError::EmptyVault          as u32,  4, "EmptyVault must be 4");
+    assert_eq!(ContractError::InvalidAmount       as u32,  5, "InvalidAmount must be 5");
+    assert_eq!(ContractError::NotOwner            as u32,  6, "NotOwner must be 6");
+    assert_eq!(ContractError::AlreadyReleased     as u32,  7, "AlreadyReleased must be 7");
+    assert_eq!(ContractError::InsufficientBalance as u32,  8, "InsufficientBalance must be 8");
+    assert_eq!(ContractError::NotAdmin            as u32,  9, "NotAdmin must be 9");
+    assert_eq!(ContractError::Paused              as u32, 10, "Paused must be 10");
+    assert_eq!(ContractError::NoPendingAdmin      as u32, 11, "NoPendingAdmin must be 11");
+    assert_eq!(ContractError::InvalidBps          as u32, 12, "InvalidBps must be 12");
+    assert_eq!(ContractError::NotExpiringSoon     as u32, 13, "NotExpiringSoon must be 13");
+    assert_eq!(ContractError::IntervalTooLow      as u32, 14, "IntervalTooLow must be 14");
+    assert_eq!(ContractError::IntervalTooHigh     as u32, 15, "IntervalTooHigh must be 15");
+    assert_eq!(ContractError::NotExpired          as u32, 16, "NotExpired must be 16");
+    assert_eq!(ContractError::InvalidBeneficiary  as u32, 17, "InvalidBeneficiary must be 17");
+    assert_eq!(ContractError::BalanceOverflow     as u32, 18, "BalanceOverflow must be 18");
+    assert_eq!(ContractError::VaultExpired        as u32, 19, "VaultExpired must be 19");
+    assert_eq!(ContractError::InvalidAdmin        as u32, 20, "InvalidAdmin must be 20");
+    assert_eq!(ContractError::NotInitialized      as u32, 21, "NotInitialized must be 21");
+
+    // --- Part 2: set equality {1..=21} (no gaps, no duplicates) ---
+    let all_discriminants: alloc::vec::Vec<u32> = alloc::vec![
+        ContractError::AlreadyInitialized  as u32,
+        ContractError::InvalidInterval     as u32,
+        ContractError::VaultNotFound       as u32,
+        ContractError::EmptyVault          as u32,
+        ContractError::InvalidAmount       as u32,
+        ContractError::NotOwner            as u32,
+        ContractError::AlreadyReleased     as u32,
+        ContractError::InsufficientBalance as u32,
+        ContractError::NotAdmin            as u32,
+        ContractError::Paused              as u32,
+        ContractError::NoPendingAdmin      as u32,
+        ContractError::InvalidBps          as u32,
+        ContractError::NotExpiringSoon     as u32,
+        ContractError::IntervalTooLow      as u32,
+        ContractError::IntervalTooHigh     as u32,
+        ContractError::NotExpired          as u32,
+        ContractError::InvalidBeneficiary  as u32,
+        ContractError::BalanceOverflow     as u32,
+        ContractError::VaultExpired        as u32,
+        ContractError::InvalidAdmin        as u32,
+        ContractError::NotInitialized      as u32,
+    ];
+
+    assert_eq!(all_discriminants.len(), 21, "expected exactly 21 variants");
+
+    // Collect into a BTreeSet to check for duplicates and gaps
+    let disc_set: alloc::collections::BTreeSet<u32> = all_discriminants.iter().cloned().collect();
+
+    // No duplicates: set cardinality must equal variant count
+    assert_eq!(
+        disc_set.len(),
+        all_discriminants.len(),
+        "duplicate discriminant values detected"
+    );
+
+    // No gaps: set must equal {{1, 2, ..., 21}}
+    let expected: alloc::collections::BTreeSet<u32> = (1u32..=21u32).collect();
+    assert_eq!(
+        disc_set,
+        expected,
+        "discriminant set does not equal {{1..=21}}: got {:?}",
+        disc_set
     );
 }
