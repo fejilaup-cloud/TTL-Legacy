@@ -1453,3 +1453,122 @@ fn test_get_vaults_by_owner_with_cancelled_status_filter() {
         vec![&env]
     );
 }
+
+// ---- Event topic constant tests ----
+
+fn find_event_by_topic(env: &Env, topic_sym: soroban_sdk::Symbol) -> bool {
+    env.events().all().iter().any(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(env);
+        topics
+            .get(0)
+            .and_then(|v| v.try_into_val(env).ok())
+            .map(|s: soroban_sdk::Symbol| s == topic_sym)
+            .unwrap_or(false)
+    })
+}
+
+#[test]
+fn test_check_in_uses_check_in_topic_constant() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    env.ledger().with_mut(|l| l.timestamp += 10);
+    client.check_in(&vault_id, &owner);
+    assert!(find_event_by_topic(&env, types::CHECK_IN_TOPIC));
+}
+
+#[test]
+fn test_cancel_vault_emits_cancel_event() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &500i128);
+    client.cancel_vault(&vault_id, &owner);
+    assert!(find_event_by_topic(&env, types::CANCEL_TOPIC));
+}
+
+#[test]
+fn test_cancel_vault_event_contains_owner_and_refund_amount() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &300i128);
+    client.cancel_vault(&vault_id, &owner);
+
+    let cancel_event = env.events().all().iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
+        topics
+            .get(0)
+            .and_then(|v| v.try_into_val(&env).ok())
+            .map(|s: soroban_sdk::Symbol| s == types::CANCEL_TOPIC)
+            .unwrap_or(false)
+    });
+    assert!(cancel_event.is_some(), "cancel event not emitted");
+
+    // data is (owner, refund_amount)
+    let data = cancel_event.unwrap().2.clone();
+    let (event_owner, refund): (Address, i128) = data.try_into_val(&env).unwrap();
+    assert_eq!(event_owner, owner);
+    assert_eq!(refund, 300i128);
+}
+
+#[test]
+fn test_transfer_ownership_emits_ownership_event() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let new_owner = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.transfer_ownership(&vault_id, &owner, &new_owner);
+    assert!(find_event_by_topic(&env, types::OWNERSHIP_TOPIC));
+}
+
+#[test]
+fn test_transfer_ownership_event_contains_old_and_new_owner() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let new_owner = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.transfer_ownership(&vault_id, &owner, &new_owner);
+
+    let ownership_event = env.events().all().iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
+        topics
+            .get(0)
+            .and_then(|v| v.try_into_val(&env).ok())
+            .map(|s: soroban_sdk::Symbol| s == types::OWNERSHIP_TOPIC)
+            .unwrap_or(false)
+    });
+    assert!(ownership_event.is_some(), "ownership event not emitted");
+
+    let data = ownership_event.unwrap().2.clone();
+    let (old, new): (Address, Address) = data.try_into_val(&env).unwrap();
+    assert_eq!(old, owner);
+    assert_eq!(new, new_owner);
+}
+
+#[test]
+fn test_update_beneficiary_emits_beneficiary_updated_event() {
+    let (env, owner, old_beneficiary, _, _, client) = setup();
+    let new_beneficiary = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &old_beneficiary, &100u64);
+    client.update_beneficiary(&vault_id, &owner, &new_beneficiary);
+    assert!(find_event_by_topic(&env, types::BENEFICIARY_UPDATED_TOPIC));
+}
+
+#[test]
+fn test_update_beneficiary_event_contains_old_and_new_beneficiary() {
+    let (env, owner, old_beneficiary, _, _, client) = setup();
+    let new_beneficiary = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &old_beneficiary, &100u64);
+    client.update_beneficiary(&vault_id, &owner, &new_beneficiary);
+
+    let ben_event = env.events().all().iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
+        topics
+            .get(0)
+            .and_then(|v| v.try_into_val(&env).ok())
+            .map(|s: soroban_sdk::Symbol| s == types::BENEFICIARY_UPDATED_TOPIC)
+            .unwrap_or(false)
+    });
+    assert!(ben_event.is_some(), "beneficiary_updated event not emitted");
+
+    let data = ben_event.unwrap().2.clone();
+    let (old, new): (Address, Address) = data.try_into_val(&env).unwrap();
+    assert_eq!(old, old_beneficiary);
+    assert_eq!(new, new_beneficiary);
+}
