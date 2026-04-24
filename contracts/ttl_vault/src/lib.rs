@@ -1290,6 +1290,9 @@ impl TtlVaultContract {
         }
     }
 
+    /// Persists a vault to storage with TTL derived from its check_in_interval.
+    /// This ensures that when update_check_in_interval modifies the interval,
+    /// the persistent storage TTL is automatically updated (issue #297).
     fn save_vault(env: &Env, vault_id: u64, vault: &Vault) {
         let key = DataKey::Vault(vault_id);
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
