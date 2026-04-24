@@ -222,6 +222,27 @@ fn test_pause_and_unpause_toggle() {
     assert!(!client.is_paused());
 }
 
+// ---- Issue #316: pause event emission test ----
+
+#[test]
+fn test_pause_emits_event() {
+    let (env, _, _, _, _, client) = setup();
+    client.pause();
+
+    let event = env.events().all().iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
+        topics
+            .get(0)
+            .and_then(|v| v.try_into_val(&env).ok())
+            .map(|s: soroban_sdk::Symbol| s == types::PAUSE_TOPIC)
+            .unwrap_or(false)
+    });
+    assert!(event.is_some(), "pause event not emitted");
+
+    let data: bool = event.unwrap().2.into_val(&env);
+    assert!(data);
+}
+
 // ---- Issue #317: unpause event emission test ----
 
 #[test]

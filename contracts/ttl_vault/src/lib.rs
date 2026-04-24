@@ -9,9 +9,9 @@ mod types;
 use types::{
     BeneficiaryEntry, DataKey, ReleaseEvent, ReleaseStatus, Vault, EXPIRY_WARNING_THRESHOLD,
     BENEFICIARY_UPDATED_TOPIC, CANCEL_TOPIC, CHECK_IN_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC,
-    PING_EXPIRY_TOPIC, RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MIN_INTERVAL_TOPIC,
-    UPDATE_INTERVAL_TOPIC, UPDATE_METADATA_TOPIC, VAULT_CREATED_TOPIC, WITHDRAW_TOPIC,
-    MAX_METADATA_LEN,
+    PAUSE_TOPIC, PING_EXPIRY_TOPIC, RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MIN_INTERVAL_TOPIC,
+    UNPAUSE_TOPIC, UPDATE_INTERVAL_TOPIC, UPDATE_METADATA_TOPIC, VAULT_CREATED_TOPIC,
+    WITHDRAW_TOPIC, MAX_METADATA_LEN,
 };
 
 #[cfg(test)]
@@ -126,6 +126,7 @@ impl TtlVaultContract {
     pub fn pause(env: Env) {
         Self::require_admin(&env);
         env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((PAUSE_TOPIC,), true);
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
