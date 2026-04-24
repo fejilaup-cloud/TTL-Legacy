@@ -222,6 +222,31 @@ fn test_pause_and_unpause_toggle() {
     assert!(!client.is_paused());
 }
 
+// ---- Issue #317: unpause event emission test ----
+
+#[test]
+fn test_unpause_emits_event() {
+    let (env, _, _, _, _, client) = setup();
+
+    client.pause();
+    client.unpause();
+
+    let events = env.events().all();
+    let unpause_event = events.iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
+        if topics.len() < 2 {
+            return false;
+        }
+        let topic0: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        topic0.map(|s| s == soroban_sdk::symbol_short!("unpause")).unwrap_or(false)
+    });
+
+    assert!(unpause_event.is_some(), "unpause event not emitted");
+    // data field should be `false` (new paused state)
+    let data: bool = unpause_event.unwrap().2.into_val(&env);
+    assert!(!data);
+}
+
 #[test]
 fn test_get_admin_view() {
     let (_, _, _, admin, _, client) = setup();

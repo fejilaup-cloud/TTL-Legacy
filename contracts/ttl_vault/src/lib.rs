@@ -140,6 +140,7 @@ impl TtlVaultContract {
     pub fn unpause(env: Env) {
         Self::require_admin(&env);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((UNPAUSE_TOPIC,), false);
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
