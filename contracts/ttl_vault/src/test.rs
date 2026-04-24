@@ -691,6 +691,14 @@ fn test_create_vault_long_interval_remains_accessible() {
     assert_eq!(vault.check_in_interval, thirty_days);
 }
 
+#[test]
+fn test_create_vault_initial_metadata_respects_max_len() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    assert!(client.get_vault(&vault_id).metadata.len() <= MAX_METADATA_LEN);
+}
+
 // ---- Issue 1: get_vaults_by_beneficiary ----
 
 #[test]

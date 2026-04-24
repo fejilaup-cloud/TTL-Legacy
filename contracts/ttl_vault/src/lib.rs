@@ -321,6 +321,8 @@ impl TtlVaultContract {
 
         let vault_id = Self::vault_count(env.clone()) + 1;
         let timestamp = env.ledger().timestamp();
+        let metadata = String::from_str(&env, "");
+        Self::assert_metadata_len(&env, &metadata);
         let vault = Vault {
             owner: owner.clone(),
             beneficiary: beneficiary.clone(),
@@ -330,7 +332,7 @@ impl TtlVaultContract {
             created_at: timestamp,
             status: ReleaseStatus::Locked,
             beneficiaries: Vec::new(&env),
-            metadata: String::from_str(&env, ""),
+            metadata,
         };
         Self::save_vault(&env, vault_id, &vault);
         Self::add_owner_vault_id(&env, &owner, vault_id);
@@ -1346,6 +1348,12 @@ impl TtlVaultContract {
             if interval > max {
                 panic_with_error!(env, ContractError::IntervalTooHigh);
             }
+        }
+    }
+
+    fn assert_metadata_len(env: &Env, metadata: &String) {
+        if metadata.len() > MAX_METADATA_LEN {
+            panic_with_error!(env, ContractError::InvalidAmount);
         }
     }
 }
