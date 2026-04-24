@@ -549,6 +549,26 @@ fn test_partial_release_fails_if_insufficient_balance() {
 }
 
 #[test]
+fn test_partial_release_rejects_zero_amount() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &500i128);
+
+    let result = client.try_partial_release(&vault_id, &0i128);
+    assert!(result.is_err(), "expected error for zero-amount partial release");
+}
+
+#[test]
+fn test_partial_release_rejects_negative_amount() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &500i128);
+
+    let result = client.try_partial_release(&vault_id, &-1i128);
+    assert!(result.is_err(), "expected error for negative-amount partial release");
+}
+
+#[test]
 fn test_partial_release_emits_partial_event() {
     let (env, owner, beneficiary, _, token_address, client) = setup();
     let token_client = token::Client::new(&env, &token_address);
