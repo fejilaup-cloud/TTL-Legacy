@@ -651,6 +651,20 @@ fn test_update_metadata_can_be_overwritten() {
 }
 
 #[test]
+fn test_update_metadata_rejects_oversized_value() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    let oversized = "a".repeat((MAX_METADATA_LEN + 1) as usize);
+
+    let err = client
+        .try_update_metadata(&vault_id, &owner, &soroban_sdk::String::from_str(&env, oversized.as_str()))
+        .unwrap_err()
+        .unwrap();
+
+    assert_eq!(err, ContractError::InvalidAmount);
+}
+
+#[test]
 fn test_get_contract_token_returns_correct_address() {
     let (_, _, _, _, token_address, client) = setup();
     assert_eq!(client.get_contract_token(), token_address);
