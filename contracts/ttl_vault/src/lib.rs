@@ -7,10 +7,11 @@ use soroban_sdk::{
 
 mod types;
 use types::{
-    BeneficiaryEntry, DataKey, ReleaseEvent, ReleaseStatus, Vault, EXPIRY_WARNING_THRESHOLD,
-    BENEFICIARY_UPDATED_TOPIC, CANCEL_TOPIC, CHECK_IN_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC,
-    PAUSE_TOPIC, PING_EXPIRY_TOPIC, RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MAX_INTERVAL_TOPIC,
-    SET_MIN_INTERVAL_TOPIC, UNPAUSE_TOPIC, UPDATE_INTERVAL_TOPIC, UPDATE_METADATA_TOPIC,
+    BeneficiaryEntry, DataKey, ReleaseEvent, ReleaseStatus, Vault, VestingSchedule,
+    EXPIRY_WARNING_THRESHOLD, BENEFICIARY_UPDATED_TOPIC, CANCEL_TOPIC, CHECK_IN_TOPIC,
+    CLAIM_VEST_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC, PAUSE_TOPIC, PING_EXPIRY_TOPIC,
+    RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MAX_INTERVAL_TOPIC, SET_MIN_INTERVAL_TOPIC,
+    SET_VESTING_TOPIC, UNPAUSE_TOPIC, UPDATE_INTERVAL_TOPIC, UPDATE_METADATA_TOPIC,
     VAULT_CREATED_TOPIC, WITHDRAW_TOPIC, MAX_METADATA_LEN,
 };
 
@@ -75,6 +76,9 @@ pub enum ContractError {
     VaultExpired = 19,
     InvalidAdmin = 20,
     NotInitialized = 21,
+    VestingNotFound = 22,
+    NothingToClaimYet = 23,
+    VestingAlreadyComplete = 24,
 }
 
 #[contract]
@@ -690,8 +694,10 @@ impl TtlVaultContract {
 
     /// Triggers the release of funds to beneficiaries after the vault expires.
     ///
-    /// Anyone can call this function once the vault's TTL has lapsed. The funds
-    /// are distributed to the primary beneficiary or split among multiple beneficiaries
+    /// Anyone can call this function once the vault's TTL has lapsed. If a vesting
+    /// schedule is attached, the vault is marked as Released but funds remain locked
+    /// until claimed via `claim_vested_installment`. Otherwise, funds are distributed
+    /// immediately to the primary beneficiary or split among multiple beneficiaries
     /// based on their BPS allocations.
     ///
     /// # Arguments
@@ -716,38 +722,57 @@ impl TtlVaultContract {
         if total == 0 {
             panic_with_error!(&env, ContractError::EmptyVault);
         }
-        let xlm = token::Client::new(&env, &Self::load_token(&env));
 
-        if vault.beneficiaries.is_empty() {
-            xlm.transfer(&env.current_contract_address(), &vault.beneficiary, &total);
+        // Check if a vesting schedule is attached
+        let has_vesting = env
+            .storage()
+            .persistent()
+            .has(&DataKey::VestingSchedule(vault_id));
+
+        if has_vesting {
+            // Vesting schedule exists: mark as Released but keep balance intact
+            vault.status = ReleaseStatus::Released;
+            Self::save_vault(&env, vault_id, &vault);
+            env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
             env.events().publish(
                 (RELEASE_TOPIC,),
-                ReleaseEvent { vault_id, beneficiary: vault.beneficiary.clone(), amount: total },
+                ReleaseEvent { vault_id, beneficiary: vault.beneficiary.clone(), amount: 0 },
             );
         } else {
-            let mut distributed: i128 = 0;
-            let last_idx = vault.beneficiaries.len() - 1;
-            for (i, entry) in vault.beneficiaries.iter().enumerate() {
-                let share = if i as u32 == last_idx {
-                    total - distributed
-                } else {
-                    total * (entry.bps as i128) / 10_000
-                };
-                if share > 0 {
-                    xlm.transfer(&env.current_contract_address(), &entry.address, &share);
-                }
-                distributed += share;
+            // No vesting: immediate full release
+            let xlm = token::Client::new(&env, &Self::load_token(&env));
+
+            if vault.beneficiaries.is_empty() {
+                xlm.transfer(&env.current_contract_address(), &vault.beneficiary, &total);
                 env.events().publish(
                     (RELEASE_TOPIC,),
-                    ReleaseEvent { vault_id, beneficiary: entry.address.clone(), amount: share },
+                    ReleaseEvent { vault_id, beneficiary: vault.beneficiary.clone(), amount: total },
                 );
+            } else {
+                let mut distributed: i128 = 0;
+                let last_idx = vault.beneficiaries.len() - 1;
+                for (i, entry) in vault.beneficiaries.iter().enumerate() {
+                    let share = if i as u32 == last_idx {
+                        total - distributed
+                    } else {
+                        total * (entry.bps as i128) / 10_000
+                    };
+                    if share > 0 {
+                        xlm.transfer(&env.current_contract_address(), &entry.address, &share);
+                    }
+                    distributed += share;
+                    env.events().publish(
+                        (RELEASE_TOPIC,),
+                        ReleaseEvent { vault_id, beneficiary: entry.address.clone(), amount: share },
+                    );
+                }
             }
-        }
 
-        vault.balance = 0;
-        vault.status = ReleaseStatus::Released;
-        Self::save_vault(&env, vault_id, &vault);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+            vault.balance = 0;
+            vault.status = ReleaseStatus::Released;
+            Self::save_vault(&env, vault_id, &vault);
+            env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        }
     }
 
     // --- Task 1: ping_expiry ---
@@ -946,6 +971,186 @@ impl TtlVaultContract {
             env.events().publish((UPDATE_METADATA_TOPIC, vault_id), metadata);
             Ok(())
         }
+
+    // --- Task 5: vesting schedules ---
+
+    /// Attaches a vesting schedule to a vault.
+    ///
+    /// Once set, the vault's balance is released to the beneficiary (or beneficiaries)
+    /// in `num_installments` equal tranches. Each tranche becomes claimable every
+    /// `interval` seconds starting from `start_time`.
+    ///
+    /// The vault must have been released (trigger_release called) before installments
+    /// can be claimed. The schedule is set by the owner while the vault is still Locked.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault to attach the schedule to
+    /// * `caller` - Must be the vault owner
+    /// * `start_time` - Unix timestamp of the first claimable installment
+    /// * `interval` - Seconds between installments (must be > 0)
+    /// * `num_installments` - Number of tranches (must be > 0)
+    ///
+    /// # Errors
+    /// * `ContractError::Paused` - If the contract is paused
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not Locked
+    /// * `ContractError::InvalidInterval` - If interval or num_installments is 0
+    /// * `ContractError::EmptyVault` - If vault balance is 0
+    pub fn set_vesting_schedule(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        start_time: u64,
+        interval: u64,
+        num_installments: u32,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        if interval == 0 || num_installments == 0 {
+            return Err(ContractError::InvalidInterval);
+        }
+        if vault.balance == 0 {
+            return Err(ContractError::EmptyVault);
+        }
+        let schedule = VestingSchedule {
+            start_time,
+            interval,
+            num_installments,
+            claimed_installments: 0,
+            total_amount: vault.balance,
+        };
+        let key = DataKey::VestingSchedule(vault_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&key, &schedule);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish(
+            (SET_VESTING_TOPIC, vault_id),
+            (start_time, interval, num_installments, vault.balance),
+        );
+        Ok(())
+    }
+
+    /// Returns the vesting schedule for a vault, if one exists.
+    pub fn get_vesting_schedule(env: Env, vault_id: u64) -> Option<VestingSchedule> {
+        env.storage().persistent().get(&DataKey::VestingSchedule(vault_id))
+    }
+
+    /// Claims all vested installments that have become available since the last claim.
+    ///
+    /// The vault must have been released (trigger_release called) and a vesting schedule
+    /// must be attached. The beneficiary (or any caller) can invoke this once the vault
+    /// is Released and at least one installment window has elapsed since `start_time`.
+    ///
+    /// Funds are distributed to the primary beneficiary, or split among multi-beneficiaries
+    /// using the same BPS logic as `trigger_release`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault to claim from
+    ///
+    /// # Returns
+    /// The total amount transferred in this call
+    ///
+    /// # Errors
+    /// * `ContractError::Paused` - If the contract is paused
+    /// * `ContractError::VestingNotFound` - If no vesting schedule exists
+    /// * `ContractError::NothingToClaimYet` - If no new installments are available
+    /// * `ContractError::VestingAlreadyComplete` - If all installments have been claimed
+    /// * `ContractError::InsufficientBalance` - If vault balance is insufficient
+    pub fn claim_vested_installment(env: Env, vault_id: u64) -> Result<i128, ContractError> {
+        Self::assert_not_paused(&env);
+        let mut vault = Self::load_vault(&env, vault_id);
+
+        // Vault must be Released for vesting claims
+        if vault.status != ReleaseStatus::Released {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VestingSchedule(vault_id))
+            .ok_or(ContractError::VestingNotFound)?;
+
+        if schedule.claimed_installments >= schedule.num_installments {
+            return Err(ContractError::VestingAlreadyComplete);
+        }
+
+        let now = env.ledger().timestamp();
+        if now < schedule.start_time {
+            return Err(ContractError::NothingToClaimYet);
+        }
+
+        // How many installments are unlocked so far?
+        let elapsed = now - schedule.start_time;
+        let unlocked = ((elapsed / schedule.interval) + 1).min(schedule.num_installments as u64) as u32;
+        let claimable = unlocked.saturating_sub(schedule.claimed_installments);
+        if claimable == 0 {
+            return Err(ContractError::NothingToClaimYet);
+        }
+
+        // Calculate payout: each installment = total / num_installments,
+        // last installment absorbs remainder.
+        let per_installment = schedule.total_amount / schedule.num_installments as i128;
+        let amount = if unlocked >= schedule.num_installments {
+            // Final batch: pay out everything remaining in the vault
+            vault.balance
+        } else {
+            per_installment * claimable as i128
+        };
+
+        if vault.balance < amount {
+            return Err(ContractError::InsufficientBalance);
+        }
+
+        let xlm = token::Client::new(&env, &Self::load_token(&env));
+
+        if vault.beneficiaries.is_empty() {
+            xlm.transfer(&env.current_contract_address(), &vault.beneficiary, &amount);
+            env.events().publish(
+                (CLAIM_VEST_TOPIC, vault_id),
+                (vault.beneficiary.clone(), amount, unlocked),
+            );
+        } else {
+            let mut distributed: i128 = 0;
+            let last_idx = vault.beneficiaries.len() - 1;
+            for (i, entry) in vault.beneficiaries.iter().enumerate() {
+                let share = if i as u32 == last_idx {
+                    amount - distributed
+                } else {
+                    amount * (entry.bps as i128) / 10_000
+                };
+                if share > 0 {
+                    xlm.transfer(&env.current_contract_address(), &entry.address, &share);
+                }
+                distributed += share;
+                env.events().publish(
+                    (CLAIM_VEST_TOPIC, vault_id),
+                    (entry.address.clone(), share, unlocked),
+                );
+            }
+        }
+
+        vault.balance -= amount;
+        schedule.claimed_installments = unlocked;
+        Self::save_vault(&env, vault_id, &vault);
+
+        let sched_key = DataKey::VestingSchedule(vault_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&sched_key, &schedule);
+        env.storage().persistent().extend_ttl(&sched_key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(amount)
+    }
 
     // --- views ---
 

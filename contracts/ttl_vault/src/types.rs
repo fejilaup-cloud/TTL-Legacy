@@ -16,6 +16,8 @@ pub const SET_MIN_INTERVAL_TOPIC: Symbol = symbol_short!("set_min");
 pub const SET_MAX_INTERVAL_TOPIC: Symbol = symbol_short!("set_max");
 pub const PAUSE_TOPIC: Symbol = symbol_short!("pause");
 pub const UNPAUSE_TOPIC: Symbol = symbol_short!("unpause");
+pub const SET_VESTING_TOPIC: Symbol = symbol_short!("set_vest");
+pub const CLAIM_VEST_TOPIC: Symbol = symbol_short!("clm_vest");
 
 /// Warning threshold in seconds. If TTL remaining < this value, ping_expiry emits an event.
 pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
@@ -37,6 +39,26 @@ pub enum DataKey {
     MinCheckInInterval,
     MaxCheckInInterval,
     Version,
+    VestingSchedule(u64),
+}
+
+/// A vesting schedule attached to a vault.
+/// Funds are released in `num_installments` equal tranches, each separated by `interval` seconds.
+/// The first installment becomes claimable at `start_time`.
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingSchedule {
+    /// Unix timestamp when the first installment becomes claimable.
+    pub start_time: u64,
+    /// Seconds between consecutive installments.
+    pub interval: u64,
+    /// Total number of installments.
+    pub num_installments: u32,
+    /// Number of installments already claimed.
+    pub claimed_installments: u32,
+    /// Total amount to vest (in stroops). Each installment = total_amount / num_installments,
+    /// with the last installment absorbing any remainder.
+    pub total_amount: i128,
 }
 
 #[contracttype]

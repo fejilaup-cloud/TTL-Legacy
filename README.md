@@ -129,6 +129,7 @@ The script will display the target network and identity, then require you to typ
 - [Threat Model & Security](docs/security.md)
 - [Security Policy & Vulnerability Disclosure](SECURITY.md)
 - [Roadmap](docs/roadmap.md)
+- [Vesting Schedules](docs/vesting-schedules.md)
 
 ## 🎓 Smart Contract API
 

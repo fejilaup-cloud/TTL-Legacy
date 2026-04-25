@@ -1922,3 +1922,274 @@ fn test_trigger_release_multi_beneficiary_bps_split_distributes_correctly() {
         token_client.balance(&ben_a) + token_client.balance(&ben_b) + token_client.balance(&ben_c);
     assert_eq!(total_distributed, total);
 }
+
+// ---- Vesting schedule tests ----
+
+/// Helper: create vault, deposit, expire, trigger_release (with vesting schedule attached).
+fn setup_vesting(
+    env: &Env,
+    owner: &Address,
+    beneficiary: &Address,
+    client: &TtlVaultContractClient<'static>,
+    amount: i128,
+    num_installments: u32,
+    interval: u64,
+) -> u64 {
+    let vault_id = client.create_vault(owner, beneficiary, &100u64);
+    client.deposit(&vault_id, owner, &amount);
+    let start_time = env.ledger().timestamp() + 200; // first installment after expiry
+    client.set_vesting_schedule(&vault_id, owner, &start_time, &interval, &num_installments);
+    // Expire the vault
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.trigger_release(&vault_id);
+    vault_id
+}
+
+#[test]
+fn test_set_vesting_schedule_stores_schedule() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    let start = env.ledger().timestamp() + 50;
+    client.set_vesting_schedule(&vault_id, &owner, &start, &100u64, &4u32);
+
+    let sched = client.get_vesting_schedule(&vault_id).unwrap();
+    assert_eq!(sched.start_time, start);
+    assert_eq!(sched.interval, 100u64);
+    assert_eq!(sched.num_installments, 4u32);
+    assert_eq!(sched.claimed_installments, 0u32);
+    assert_eq!(sched.total_amount, 1_000i128);
+}
+
+#[test]
+fn test_set_vesting_schedule_requires_owner() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    let stranger = Address::generate(&env);
+    let start = env.ledger().timestamp() + 50;
+    let err = client
+        .try_set_vesting_schedule(&vault_id, &stranger, &start, &100u64, &4u32)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::NotOwner);
+}
+
+#[test]
+fn test_set_vesting_schedule_rejects_zero_interval() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    let err = client
+        .try_set_vesting_schedule(&vault_id, &owner, &0u64, &0u64, &4u32)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::InvalidInterval);
+}
+
+#[test]
+fn test_set_vesting_schedule_rejects_zero_installments() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    let err = client
+        .try_set_vesting_schedule(&vault_id, &owner, &0u64, &100u64, &0u32)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::InvalidInterval);
+}
+
+#[test]
+fn test_set_vesting_schedule_rejects_empty_vault() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    // No deposit — balance is 0
+
+    let err = client
+        .try_set_vesting_schedule(&vault_id, &owner, &0u64, &100u64, &4u32)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::EmptyVault);
+}
+
+#[test]
+fn test_trigger_release_with_vesting_keeps_balance() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = setup_vesting(&env, &owner, &beneficiary, &client, 1_000i128, 4, 100u64);
+
+    // Vault is Released but balance is intact
+    assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Released);
+    assert_eq!(client.get_vault(&vault_id).balance, 1_000i128);
+}
+
+#[test]
+fn test_claim_first_installment() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let token_client = token::Client::new(&env, &token_address);
+
+    // 4 installments of 250 each, interval = 100s
+    let vault_id = setup_vesting(&env, &owner, &beneficiary, &client, 1_000i128, 4, 100u64);
+
+    // Advance past first installment window (start_time is already reached since we advanced 200s)
+    let claimed = client.claim_vested_installment(&vault_id);
+    assert_eq!(claimed, 250i128);
+    assert_eq!(token_client.balance(&beneficiary), 250i128);
+    assert_eq!(client.get_vault(&vault_id).balance, 750i128);
+
+    let sched = client.get_vesting_schedule(&vault_id).unwrap();
+    assert_eq!(sched.claimed_installments, 1u32);
+}
+
+#[test]
+fn test_claim_multiple_installments_at_once() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let token_client = token::Client::new(&env, &token_address);
+
+    // 4 installments of 250 each, interval = 50s
+    // After trigger_release, timestamp = start_time (window 0 is claimable)
+    // Advance another 100s → windows 0, 1, 2 are claimable (elapsed=100, unlocked=3)
+    let vault_id = setup_vesting(&env, &owner, &beneficiary, &client, 1_000i128, 4, 50u64);
+    env.ledger().with_mut(|l| l.timestamp += 100);
+
+    let claimed = client.claim_vested_installment(&vault_id);
+    // 3 installments × 250 = 750
+    assert_eq!(claimed, 750i128);
+    assert_eq!(token_client.balance(&beneficiary), 750i128);
+
+    let sched = client.get_vesting_schedule(&vault_id).unwrap();
+    assert_eq!(sched.claimed_installments, 3u32);
+}
+
+#[test]
+fn test_claim_all_installments_drains_vault() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let token_client = token::Client::new(&env, &token_address);
+
+    // 4 installments, interval = 50s; advance past all 4
+    let vault_id = setup_vesting(&env, &owner, &beneficiary, &client, 1_000i128, 4, 50u64);
+    env.ledger().with_mut(|l| l.timestamp += 300); // well past all 4 windows
+
+    let claimed = client.claim_vested_installment(&vault_id);
+    assert_eq!(claimed, 1_000i128);
+    assert_eq!(token_client.balance(&beneficiary), 1_000i128);
+    assert_eq!(client.get_vault(&vault_id).balance, 0i128);
+
+    let sched = client.get_vesting_schedule(&vault_id).unwrap();
+    assert_eq!(sched.claimed_installments, 4u32);
+}
+
+#[test]
+fn test_claim_nothing_to_claim_before_start_time() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    // start_time is far in the future
+    let start = env.ledger().timestamp() + 10_000;
+    client.set_vesting_schedule(&vault_id, &owner, &start, &100u64, &4u32);
+
+    // Expire and release
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.trigger_release(&vault_id);
+
+    // Trying to claim before start_time should fail
+    let err = client
+        .try_claim_vested_installment(&vault_id)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::NothingToClaimYet);
+}
+
+#[test]
+fn test_claim_already_complete_error() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = setup_vesting(&env, &owner, &beneficiary, &client, 1_000i128, 4, 50u64);
+    env.ledger().with_mut(|l| l.timestamp += 300); // past all installments
+
+    client.claim_vested_installment(&vault_id); // claim all
+
+    let err = client
+        .try_claim_vested_installment(&vault_id)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::VestingAlreadyComplete);
+}
+
+#[test]
+fn test_claim_no_schedule_returns_vesting_not_found() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let token_client = token::Client::new(&env, &token_address);
+
+    // Normal vault without vesting schedule
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &1_000i128);
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.trigger_release(&vault_id);
+
+    // Vault is Released with no vesting schedule — balance should be 0 (immediate release)
+    assert_eq!(client.get_vault(&vault_id).balance, 0i128);
+    assert_eq!(token_client.balance(&beneficiary), 1_000i128);
+
+    let err = client
+        .try_claim_vested_installment(&vault_id)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::VestingNotFound);
+}
+
+#[test]
+fn test_vesting_with_multi_beneficiary_split() {
+    let (env, owner, ben_a, _, token_address, client) = setup();
+    let ben_b = Address::generate(&env);
+    let token_client = token::Client::new(&env, &token_address);
+
+    let vault_id = client.create_vault(&owner, &ben_a, &100u64);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    // Set 50/50 split
+    let entries = soroban_sdk::vec![
+        &env,
+        BeneficiaryEntry { address: ben_a.clone(), bps: 5_000 },
+        BeneficiaryEntry { address: ben_b.clone(), bps: 5_000 },
+    ];
+    client.set_beneficiaries(&vault_id, &owner, &entries);
+
+    let start = env.ledger().timestamp() + 200;
+    client.set_vesting_schedule(&vault_id, &owner, &start, &100u64, &2u32);
+
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.trigger_release(&vault_id);
+
+    // Claim first installment (500 total, split 50/50 → 250 each)
+    let claimed = client.claim_vested_installment(&vault_id);
+    assert_eq!(claimed, 500i128);
+    assert_eq!(token_client.balance(&ben_a), 250i128);
+    assert_eq!(token_client.balance(&ben_b), 250i128);
+}
+
+#[test]
+fn test_set_vesting_emits_event() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    let start = env.ledger().timestamp() + 50;
+    client.set_vesting_schedule(&vault_id, &owner, &start, &100u64, &4u32);
+
+    assert!(find_event_by_topic(&env, types::SET_VESTING_TOPIC));
+}
+
+#[test]
+fn test_claim_vested_emits_event() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = setup_vesting(&env, &owner, &beneficiary, &client, 1_000i128, 4, 50u64);
+    env.ledger().with_mut(|l| l.timestamp += 100);
+
+    client.claim_vested_installment(&vault_id);
+
+    assert!(find_event_by_topic(&env, types::CLAIM_VEST_TOPIC));
+}
