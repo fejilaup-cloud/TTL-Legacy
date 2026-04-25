@@ -1644,3 +1644,190 @@ fn test_update_check_in_interval_emits_event_with_old_and_new() {
     assert_eq!(old, 100u64);
     assert_eq!(new, 300u64);
 }
+
+// ---- Issue #320: get_release_status ----
+
+#[test]
+fn test_get_release_status_returns_locked_released_cancelled() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+
+    // Create a vault — should be Locked
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Locked);
+
+    // Deposit and trigger release after expiry — should become Released
+    client.deposit(&vault_id, &owner, &1_000i128);
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.trigger_release(&vault_id);
+    assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Released);
+
+    // Create another vault and cancel it — should become Cancelled
+    let owner2 = Address::generate(&env);
+    let beneficiary2 = Address::generate(&env);
+    let token_client = token::Client::new(&env, &token_address);
+    StellarAssetClient::new(&env, &token_address).mint(&owner2, &500_000);
+    let vault_id2 = client.create_vault(&owner2, &beneficiary2, &100u64);
+    client.deposit(&vault_id2, &owner2, &500i128);
+    client.cancel_vault(&vault_id2, &owner2);
+    assert_eq!(client.get_release_status(&vault_id2), ReleaseStatus::Cancelled);
+    // Owner should have been refunded
+    assert_eq!(token_client.balance(&owner2), 500_000i128);
+}
+
+// ---- Issue #318: batch_withdraw ----
+
+#[test]
+fn test_batch_withdraw_decrements_multiple_vaults() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let token_client = token::Client::new(&env, &token_address);
+
+    let vault_id_1 = client.create_vault(&owner, &beneficiary, &100u64);
+    let vault_id_2 = client.create_vault(&owner, &beneficiary, &100u64);
+
+    client.deposit(&vault_id_1, &owner, &500i128);
+    client.deposit(&vault_id_2, &owner, &300i128);
+
+    client.batch_withdraw(
+        &vec![&env, vault_id_1, vault_id_2],
+        &vec![&env, 200i128, 100i128],
+        &owner,
+    );
+
+    assert_eq!(client.get_vault(&vault_id_1).balance, 300i128);
+    assert_eq!(client.get_vault(&vault_id_2).balance, 200i128);
+    // owner started at 1_000_000, deposited 800, withdrawn 300
+    assert_eq!(token_client.balance(&owner), 999_500i128);
+}
+
+#[test]
+fn test_batch_withdraw_validates_mismatched_lengths() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    let err = client
+        .try_batch_withdraw(
+            &vec![&env, vault_id],
+            &vec![&env, 100i128, 200i128], // one extra amount
+            &owner,
+        )
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::InvalidAmount);
+}
+
+#[test]
+fn test_batch_withdraw_rolls_back_on_insufficient_balance() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    let vault_id_1 = client.create_vault(&owner, &beneficiary, &100u64);
+    let vault_id_2 = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id_1, &owner, &100i128);
+    // vault_id_2 has 0 balance
+
+    // Attempting to withdraw from vault_id_2 should fail; vault_id_1 must be unchanged
+    assert!(client
+        .try_batch_withdraw(
+            &vec![&env, vault_id_1, vault_id_2],
+            &vec![&env, 50i128, 1i128],
+            &owner,
+        )
+        .is_err());
+
+    assert_eq!(client.get_vault(&vault_id_1).balance, 100i128);
+    assert_eq!(client.get_vault(&vault_id_2).balance, 0i128);
+}
+
+// ---- Issue #319: batch_check_in ----
+
+#[test]
+fn test_batch_check_in_resets_last_check_in_for_multiple_vaults() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    let vault_id_1 = client.create_vault(&owner, &beneficiary, &100u64);
+    let vault_id_2 = client.create_vault(&owner, &beneficiary, &200u64);
+
+    // Advance time so it is clearly different from creation time
+    env.ledger().with_mut(|l| l.timestamp += 50);
+    let now = env.ledger().timestamp();
+
+    client.batch_check_in(&vec![&env, vault_id_1, vault_id_2], &owner);
+
+    assert_eq!(client.get_vault(&vault_id_1).last_check_in, now);
+    assert_eq!(client.get_vault(&vault_id_2).last_check_in, now);
+}
+
+#[test]
+fn test_batch_check_in_extends_vault_expiry() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    // interval = 100s
+    let vault_id_1 = client.create_vault(&owner, &beneficiary, &100u64);
+    let vault_id_2 = client.create_vault(&owner, &beneficiary, &100u64);
+
+    // Advance 90s (vaults are about to expire)
+    env.ledger().with_mut(|l| l.timestamp += 90);
+
+    // Check in — resets the timer
+    client.batch_check_in(&vec![&env, vault_id_1, vault_id_2], &owner);
+
+    // Advance another 50s — should not be expired yet (timer was reset)
+    env.ledger().with_mut(|l| l.timestamp += 50);
+    assert!(!client.is_expired(&vault_id_1));
+    assert!(!client.is_expired(&vault_id_2));
+}
+
+#[test]
+fn test_batch_check_in_fails_for_non_owner() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let other = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    assert!(client
+        .try_batch_check_in(&vec![&env, vault_id], &other)
+        .is_err());
+}
+
+// ---- Issue #327: trigger_release with multi-beneficiary BPS split ----
+
+#[test]
+fn test_trigger_release_multi_beneficiary_bps_split_distributes_correctly() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let token_client = token::Client::new(&env, &token_address);
+
+    // Create 3 beneficiaries at 50%, 30%, 20% BPS
+    let ben_a = beneficiary.clone(); // 50%  = 5_000 bps
+    let ben_b = Address::generate(&env); // 30%  = 3_000 bps
+    let ben_c = Address::generate(&env); // 20%  = 2_000 bps
+
+    let vault_id = client.create_vault(&owner, &ben_a, &100u64);
+
+    let entries = soroban_sdk::vec![
+        &env,
+        BeneficiaryEntry { address: ben_a.clone(), bps: 5_000 },
+        BeneficiaryEntry { address: ben_b.clone(), bps: 3_000 },
+        BeneficiaryEntry { address: ben_c.clone(), bps: 2_000 },
+    ];
+    client.set_beneficiaries(&vault_id, &owner, &entries);
+
+    // Deposit 10_000 stroops
+    let total: i128 = 10_000;
+    client.deposit(&vault_id, &owner, &total);
+
+    // Expire the vault and trigger release
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.trigger_release(&vault_id);
+
+    // Assert vault is Released and balance is zero
+    assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Released);
+    assert_eq!(client.get_vault(&vault_id).balance, 0i128);
+
+    // Expected shares: ben_a = 5000, ben_b = 3000, ben_c = 2000 (last entry absorbs dust)
+    assert_eq!(token_client.balance(&ben_a), 5_000i128);
+    assert_eq!(token_client.balance(&ben_b), 3_000i128);
+    assert_eq!(token_client.balance(&ben_c), 2_000i128);
+
+    // Total distributed must equal total deposited — no dust remains in contract
+    let total_distributed =
+        token_client.balance(&ben_a) + token_client.balance(&ben_b) + token_client.balance(&ben_c);
+    assert_eq!(total_distributed, total);
+}
