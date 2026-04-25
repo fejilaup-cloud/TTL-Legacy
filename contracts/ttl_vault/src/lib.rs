@@ -12,7 +12,8 @@ use types::{
     CLAIM_VEST_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC, PAUSE_TOPIC, PING_EXPIRY_TOPIC,
     RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MAX_INTERVAL_TOPIC, SET_MIN_INTERVAL_TOPIC,
     SET_VESTING_TOPIC, UNPAUSE_TOPIC, UPDATE_INTERVAL_TOPIC, UPDATE_METADATA_TOPIC,
-    VAULT_CREATED_TOPIC, WITHDRAW_TOPIC, MAX_METADATA_LEN,
+    VAULT_CREATED_TOPIC, WITHDRAW_TOPIC, MAX_METADATA_LEN, MAX_NAME_LEN, MAX_DESCRIPTION_LEN,
+    MAX_NOTES_LEN,
 };
 
 #[cfg(test)]
@@ -312,61 +313,64 @@ impl TtlVaultContract {
     /// * Panics if `check_in_interval` is 0
     /// * Panics if `check_in_interval` is outside the configured min/max bounds
     pub fn create_vault(
-        env: Env,
-        owner: Address,
-        beneficiary: Address,
-        check_in_interval: u64,
-    ) -> u64 {
-        owner.require_auth();
-        Self::require_initialized(&env);
-        if check_in_interval == 0 {
-            panic_with_error!(&env, ContractError::InvalidInterval);
+            env: Env,
+            owner: Address,
+            beneficiary: Address,
+            check_in_interval: u64,
+        ) -> u64 {
+            owner.require_auth();
+            Self::require_initialized(&env);
+            if check_in_interval == 0 {
+                panic_with_error!(&env, ContractError::InvalidInterval);
+            }
+
+            Self::assert_interval_in_bounds(&env, check_in_interval);
+
+            if owner == beneficiary {
+                panic_with_error!(&env, ContractError::InvalidBeneficiary);
+            }
+
+            let vault_id = Self::vault_count(env.clone()) + 1;
+            let timestamp = env.ledger().timestamp();
+            let metadata = String::from_str(&env, "");
+            Self::assert_metadata_len(&env, &metadata);
+            let vault = Vault {
+                owner: owner.clone(),
+                beneficiary: beneficiary.clone(),
+                balance: 0,
+                check_in_interval,
+                last_check_in: timestamp,
+                created_at: timestamp,
+                status: ReleaseStatus::Locked,
+                beneficiaries: Vec::new(&env),
+                metadata,
+                name: String::from_str(&env, ""),
+                description: String::from_str(&env, ""),
+                notes: String::from_str(&env, ""),
+            };
+            Self::save_vault(&env, vault_id, &vault);
+            Self::add_owner_vault_id(&env, &owner, vault_id, check_in_interval);
+            Self::add_beneficiary_vault_id(&env, &beneficiary, vault_id, check_in_interval);
+            // VaultCount is an incrementing generation ID and must be updated
+            // only after the vault and its owner/beneficiary indexes are persisted.
+            //
+            // Ordering guarantee:
+            //  1) Compute next ID from current vault count
+            //  2) Persist the vault and owner/beneficiary indexes
+            //  3) Persist VaultCount only after the vault is fully saved
+            // If any prior call (save_vault/add_owner_vault_id/add_beneficiary_vault_id)
+            // panics, VaultCount remains unchanged and consumers cannot observe
+            // a hole in the sequence.
+            let key = DataKey::VaultCount;
+            env.storage().persistent().set(&key, &vault_id);
+            env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+            env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+            env.events().publish(
+                (VAULT_CREATED_TOPIC,),
+                (vault_id, owner, beneficiary, check_in_interval, timestamp),
+            );
+            vault_id
         }
-
-        Self::assert_interval_in_bounds(&env, check_in_interval);
-
-        if owner == beneficiary {
-            panic_with_error!(&env, ContractError::InvalidBeneficiary);
-        }
-
-        let vault_id = Self::vault_count(env.clone()) + 1;
-        let timestamp = env.ledger().timestamp();
-        let metadata = String::from_str(&env, "");
-        Self::assert_metadata_len(&env, &metadata);
-        let vault = Vault {
-            owner: owner.clone(),
-            beneficiary: beneficiary.clone(),
-            balance: 0,
-            check_in_interval,
-            last_check_in: timestamp,
-            created_at: timestamp,
-            status: ReleaseStatus::Locked,
-            beneficiaries: Vec::new(&env),
-            metadata,
-        };
-        Self::save_vault(&env, vault_id, &vault);
-        Self::add_owner_vault_id(&env, &owner, vault_id, check_in_interval);
-        Self::add_beneficiary_vault_id(&env, &beneficiary, vault_id, check_in_interval);
-        // VaultCount is an incrementing generation ID and must be updated
-        // only after the vault and its owner/beneficiary indexes are persisted.
-        //
-        // Ordering guarantee:
-        //  1) Compute next ID from current vault count
-        //  2) Persist the vault and owner/beneficiary indexes
-        //  3) Persist VaultCount only after the vault is fully saved
-        // If any prior call (save_vault/add_owner_vault_id/add_beneficiary_vault_id)
-        // panics, VaultCount remains unchanged and consumers cannot observe
-        // a hole in the sequence.
-        let key = DataKey::VaultCount;
-        env.storage().persistent().set(&key, &vault_id);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events().publish(
-            (VAULT_CREATED_TOPIC,),
-            (vault_id, owner, beneficiary, check_in_interval, timestamp),
-        );
-        vault_id
-    }
 
     /// Records a check-in to reset the vault's expiry timer.
     ///
@@ -971,6 +975,68 @@ impl TtlVaultContract {
             env.events().publish((UPDATE_METADATA_TOPIC, vault_id), metadata);
             Ok(())
         }
+
+    /// Sets the vault name, description, and notes fields.
+    /// 
+    /// # Arguments
+    /// * `vault_id` - The vault ID
+    /// * `caller` - The address calling this function (must be vault owner)
+    /// * `name` - Vault name/title (max 64 chars)
+    /// * `description` - Vault description (max 512 chars)
+    /// * `notes` - Notes/instructions for beneficiary (max 1024 chars)
+    /// 
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    /// * `ContractError::InvalidAmount` - If any field exceeds size limits
+    pub fn set_vault_notes(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        name: String,
+        description: String,
+        notes: String,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        
+        // Validate field lengths
+        if name.len() > MAX_NAME_LEN {
+            return Err(ContractError::InvalidAmount);
+        }
+        if description.len() > MAX_DESCRIPTION_LEN {
+            return Err(ContractError::InvalidAmount);
+        }
+        if notes.len() > MAX_NOTES_LEN {
+            return Err(ContractError::InvalidAmount);
+        }
+        
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        
+        vault.name = name;
+        vault.description = description;
+        vault.notes = notes;
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Gets the vault metadata fields (name, description, notes).
+    /// 
+    /// # Arguments
+    /// * `vault_id` - The vault ID
+    /// 
+    /// # Returns
+    /// A tuple of (name, description, notes)
+    pub fn get_vault_notes(env: Env, vault_id: u64) -> (String, String, String) {
+        let vault = Self::load_vault(&env, vault_id);
+        (vault.name, vault.description, vault.notes)
+    }
 
     // --- Task 5: vesting schedules ---
 

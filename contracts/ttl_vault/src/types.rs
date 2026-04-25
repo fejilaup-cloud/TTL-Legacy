@@ -25,6 +25,15 @@ pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
 /// Maximum length for vault metadata string
 pub const MAX_METADATA_LEN: u32 = 256;
 
+/// Maximum length for vault name
+pub const MAX_NAME_LEN: u32 = 64;
+
+/// Maximum length for vault description
+pub const MAX_DESCRIPTION_LEN: u32 = 512;
+
+/// Maximum length for vault notes
+pub const MAX_NOTES_LEN: u32 = 1024;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -102,4 +111,10 @@ pub struct Vault {
     pub beneficiaries: Vec<BeneficiaryEntry>,
     /// Optional short metadata string (label or IPFS hash).
     pub metadata: String,
+    /// Vault name/title for easy identification
+    pub name: String,
+    /// Detailed description of vault purpose
+    pub description: String,
+    /// Notes/instructions for beneficiary
+    pub notes: String,
 }

@@ -504,6 +504,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "description"
+                      },
+                      "val": {
+                        "string": ""
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "last_check_in"
                       },
                       "val": {
@@ -516,6 +524,22 @@
                       },
                       "val": {
                         "string": "ipfs://Qm123"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "name"
+                      },
+                      "val": {
+                        "string": ""
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "notes"
+                      },
+                      "val": {
+                        "string": ""
                       }
                     },
                     {
