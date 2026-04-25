@@ -2193,3 +2193,17 @@ fn test_claim_vested_emits_event() {
 
     assert!(find_event_by_topic(&env, types::CLAIM_VEST_TOPIC));
 }
+
+#[test]
+fn test_get_vault_beneficiary() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    assert_eq!(client.get_vault_beneficiary(&vault_id), beneficiary);
+}
+
+#[test]
+fn test_get_vault_check_in_interval() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &300u64);
+    assert_eq!(client.get_vault_check_in_interval(&vault_id), 300u64);
+}

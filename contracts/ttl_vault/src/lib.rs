@@ -1189,6 +1189,30 @@ impl TtlVaultContract {
         Self::load_vault(&env, vault_id)
     }
 
+    /// Returns the primary beneficiary address of a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Panics
+    /// Panics if the vault does not exist
+    pub fn get_vault_beneficiary(env: Env, vault_id: u64) -> Address {
+        Self::load_vault(&env, vault_id).beneficiary
+    }
+
+    /// Returns the check-in interval (in seconds) of a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Panics
+    /// Panics if the vault does not exist
+    pub fn get_vault_check_in_interval(env: Env, vault_id: u64) -> u64 {
+        Self::load_vault(&env, vault_id).check_in_interval
+    }
+
     /// Checks if a vault exists.
     ///
     /// # Arguments
