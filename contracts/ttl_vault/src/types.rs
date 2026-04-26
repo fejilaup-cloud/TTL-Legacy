@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, symbol_short, Address, String, Symbol, Vec};
+use soroban_sdk::{contracttype, symbol_short, Address, Bytes, String, Symbol, Vec};
 
 pub const RELEASE_TOPIC: Symbol = symbol_short!("release");
 pub const VAULT_CREATED_TOPIC: Symbol = symbol_short!("v_created");
@@ -18,10 +18,10 @@ pub const PAUSE_TOPIC: Symbol = symbol_short!("pause");
 pub const UNPAUSE_TOPIC: Symbol = symbol_short!("unpause");
 pub const SET_VESTING_TOPIC: Symbol = symbol_short!("set_vest");
 pub const CLAIM_VEST_TOPIC: Symbol = symbol_short!("clm_vest");
-pub const TTL_DECAY_TOPIC: Symbol = symbol_short!("ttl_decay");
-pub const SYNC_TTL_TOPIC: Symbol = symbol_short!("sync_ttl");
-pub const SET_MAX_TTL_TOPIC: Symbol = symbol_short!("set_max_ttl");
-pub const SET_DECAY_RATE_TOPIC: Symbol = symbol_short!("set_decay");
+pub const PAUSE_VAULT_TOPIC: Symbol = symbol_short!("v_pause");
+pub const RESUME_VAULT_TOPIC: Symbol = symbol_short!("v_resume");
+pub const SET_METADATA_TOPIC: Symbol = symbol_short!("set_meta");
+pub const INHERITANCE_TOPIC: Symbol = symbol_short!("inherit");
 
 /// Warning threshold in seconds. If TTL remaining < this value, ping_expiry emits an event.
 pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
@@ -37,6 +37,9 @@ pub const MAX_DESCRIPTION_LEN: u32 = 512;
 
 /// Maximum length for vault notes
 pub const MAX_NOTES_LEN: u32 = 1024;
+
+/// Maximum length for custom metadata bytes (2KB) - Issue #378
+pub const MAX_CUSTOM_METADATA_LEN: u32 = 2048;
 
 #[contracttype]
 #[derive(Clone)]
@@ -54,8 +57,8 @@ pub enum DataKey {
     Version,
     VestingSchedule(u64),
     TokenWhitelist(Address),
-    MaxTtlSeconds,
-    TtlDecayRate,
+    VaultMetadata(u64),
+    ParentVault(u64),
 }
 
 /// A vesting schedule attached to a vault.
@@ -83,6 +86,14 @@ pub enum ReleaseStatus {
     Locked,
     Released,
     Cancelled,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReleaseCondition {
+    OnExpiry,
+    OnProof(u32),
+    Tranche(Vec<(u64, u32)>),
 }
 
 #[contracttype]
@@ -120,4 +131,12 @@ pub struct Vault {
     pub metadata: String,
     /// Token contract address for this vault. Uses default XLM token if not specified.
     pub token_address: Address,
+    /// Custom metadata as bytes (max 2KB) - Issue #378
+    pub custom_metadata: Bytes,
+    /// Whether the vault is paused - Issue #380
+    pub is_paused: bool,
+    /// Release condition for the vault - Issue #379
+    pub release_condition: ReleaseCondition,
+    /// Parent vault ID for inheritance chain - Issue #381
+    pub parent_vault_id: Option<u64>,
 }
