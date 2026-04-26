@@ -931,6 +931,65 @@ impl TtlVaultContract {
         }
     }
 
+    /// Applies TTL decay to a vault if no check-in for 30 days.
+    ///
+    /// Anyone can call this function. If the vault hasn't been checked in for 30 days,
+    /// the TTL is reduced by the configured decay rate. This encourages regular engagement.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// `Ok(new_ttl_remaining)` with the remaining TTL after decay, or `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::VaultNotFound` - If vault does not exist
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn apply_ttl_decay(env: Env, vault_id: u64) -> Result<u64, ContractError> {
+        let mut vault = Self::try_load_vault(&env, vault_id)
+            .ok_or(ContractError::VaultNotFound)?;
+        
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        
+        let decay_rate = Self::get_ttl_decay_rate(env.clone());
+        if decay_rate == 0 {
+            // No decay configured
+            return Ok(Self::get_ttl_remaining(env, vault_id).unwrap_or(0));
+        }
+        
+        let now = env.ledger().timestamp();
+        let last_check_in = vault.last_check_in;
+        let thirty_days = 30 * 24 * 60 * 60; // 2,592,000 seconds
+        
+        // Only apply decay if no check-in for 30 days
+        if now < last_check_in + thirty_days {
+            return Ok(Self::get_ttl_remaining(env, vault_id).unwrap_or(0));
+        }
+        
+        // Calculate new TTL with decay applied
+        let current_deadline = last_check_in + vault.check_in_interval;
+        let remaining = if now >= current_deadline {
+            0u64
+        } else {
+            current_deadline - now
+        };
+        
+        // Apply decay: new_ttl = remaining * (1 - decay_rate / 10000)
+        let decayed_ttl = remaining * (10_000 - decay_rate as u64) / 10_000;
+        let new_deadline = now + decayed_ttl;
+        
+        // Update last_check_in to reflect the decay application
+        vault.last_check_in = new_deadline - vault.check_in_interval;
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((TTL_DECAY_TOPIC, vault_id), (remaining, decayed_ttl));
+        
+        Ok(decayed_ttl)
+    }
+
     // --- Task 1: ping_expiry ---
 
     /// Checks the remaining TTL and emits a warning event if near expiry.
