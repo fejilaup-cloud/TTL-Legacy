@@ -1329,6 +1329,18 @@ impl TtlVaultContract {
         Self::load_vault(&env, vault_id)
     }
 
+    /// Returns the last check-in timestamp for a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// The Unix timestamp of the last check-in
+    pub fn get_vault_last_check_in(env: Env, vault_id: u64) -> u64 {
+        Self::load_vault(&env, vault_id).last_check_in
+    }
+
     /// Checks if a vault exists.
     ///
     /// # Arguments

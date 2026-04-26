@@ -2193,3 +2193,15 @@ fn test_claim_vested_emits_event() {
 
     assert!(find_event_by_topic(&env, types::CLAIM_VEST_TOPIC));
 }
+
+#[test]
+fn test_get_vault_last_check_in_returns_correct_timestamp() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    env.ledger().with_mut(|l| l.timestamp += 50);
+    client.check_in(&vault_id, &owner);
+
+    let expected = env.ledger().timestamp();
+    assert_eq!(client.get_vault_last_check_in(&vault_id), expected);
+}
