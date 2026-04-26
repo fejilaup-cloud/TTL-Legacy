@@ -18,9 +18,16 @@ pub const PAUSE_TOPIC: Symbol = symbol_short!("pause");
 pub const UNPAUSE_TOPIC: Symbol = symbol_short!("unpause");
 pub const SET_VESTING_TOPIC: Symbol = symbol_short!("set_vest");
 pub const CLAIM_VEST_TOPIC: Symbol = symbol_short!("clm_vest");
+pub const SET_RECOVERY_TOPIC: Symbol = symbol_short!("set_rec");
+pub const RECOVERY_EXTEND_TOPIC: Symbol = symbol_short!("rec_ext");
+pub const VAULT_CLONED_TOPIC: Symbol = symbol_short!("cloned");
+pub const VAULT_EXPIRY_WARNING_TOPIC: Symbol = symbol_short!("exp_warn");
 
 /// Warning threshold in seconds. If TTL remaining < this value, ping_expiry emits an event.
 pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
+
+/// Recovery extension duration in seconds (30 days)
+pub const RECOVERY_EXTENSION_DURATION: u64 = 2_592_000;
 
 /// Maximum length for vault metadata string
 pub const MAX_METADATA_LEN: u32 = 256;
@@ -50,6 +57,8 @@ pub enum DataKey {
     Version,
     VestingSchedule(u64),
     TokenWhitelist(Address),
+    RecoveryContact(u64),
+    VaultAuditLog(u64),
 }
 
 /// A vesting schedule attached to a vault.
@@ -96,6 +105,16 @@ pub struct BeneficiaryEntry {
     pub bps: u32,
 }
 
+/// Audit log entry for vault operations
+#[contracttype]
+#[derive(Clone)]
+pub struct AuditEntry {
+    pub timestamp: u64,
+    pub operation: String,
+    pub actor: Address,
+    pub details: String,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct Vault {
@@ -114,4 +133,6 @@ pub struct Vault {
     pub metadata: String,
     /// Token contract address for this vault. Uses default XLM token if not specified.
     pub token_address: Address,
+    /// Optional recovery contact who can extend TTL if owner loses access
+    pub recovery_contact: Option<Address>,
 }
