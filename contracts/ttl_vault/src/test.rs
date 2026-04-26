@@ -2205,3 +2205,51 @@ fn test_get_vault_last_check_in_returns_correct_timestamp() {
     let expected = env.ledger().timestamp();
     assert_eq!(client.get_vault_last_check_in(&vault_id), expected);
 }
+
+// --- #305: is_expired boundary ---
+
+/// Verifies that is_expired returns true at the exact deadline (now == deadline).
+/// The expiry condition is `now >= deadline`, so the boundary must be expired.
+#[test]
+fn test_is_expired_at_exact_deadline() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let interval = 100u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval);
+
+    // One tick before deadline: not expired
+    env.ledger().with_mut(|l| l.timestamp += interval - 1);
+    assert!(!client.is_expired(&vault_id));
+
+    // Exactly at deadline: expired
+    env.ledger().with_mut(|l| l.timestamp += 1);
+    assert!(client.is_expired(&vault_id));
+}
+
+// --- #306: get_vault does not extend TTL ---
+
+/// Verifies that get_vault is read-only and does not extend the vault's
+/// persistent storage TTL. Repeated reads must not alter ledger state.
+#[test]
+fn test_get_vault_does_not_extend_ttl() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    // Capture TTL immediately after creation
+    let ttl_after_create = env
+        .storage()
+        .persistent()
+        .get_ttl(&DataKey::Vault(vault_id));
+
+    // Read the vault multiple times
+    client.get_vault(&vault_id);
+    client.get_vault(&vault_id);
+    client.get_vault(&vault_id);
+
+    // TTL must be unchanged — get_vault must not extend it
+    let ttl_after_reads = env
+        .storage()
+        .persistent()
+        .get_ttl(&DataKey::Vault(vault_id));
+
+    assert_eq!(ttl_after_create, ttl_after_reads);
+}

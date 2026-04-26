@@ -1299,6 +1299,17 @@ impl TtlVaultContract {
     /// A vault is considered expired when the current timestamp is greater than
     /// or equal to the deadline (last_check_in + check_in_interval).
     ///
+    /// # Ledger time monotonicity assumption
+    /// This function relies on `env.ledger().timestamp()` being monotonically
+    /// non-decreasing across ledger closes. The Stellar consensus protocol
+    /// guarantees this property: each ledger's close time must be strictly
+    /// greater than the previous ledger's close time. Clock skew between
+    /// individual validators does not affect this guarantee because the
+    /// agreed-upon close time is determined by consensus, not by any single
+    /// node's wall clock. Therefore the comparison `now >= deadline` is
+    /// reliable and will never produce a false expiry due to time going
+    /// backwards.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
@@ -1315,6 +1326,15 @@ impl TtlVaultContract {
     }
 
     /// Retrieves a vault by its unique identifier.
+    ///
+    /// This is a pure read-only function. It does **not** extend the vault's
+    /// persistent storage TTL. Extending TTL on every read would introduce
+    /// unintended side effects: callers (including off-chain indexers) would
+    /// inadvertently pay storage fees and mutate ledger state. TTL extension
+    /// is intentionally reserved for state-mutating operations such as
+    /// `check_in`, `deposit`, and `withdraw`. If a vault is only ever read
+    /// and never written to, its storage TTL will eventually lapse and the
+    /// entry will be archived by the network.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment
