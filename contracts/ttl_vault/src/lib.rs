@@ -2002,7 +2002,6 @@ impl TtlVaultContract {
             None
         }
     }
-        }
 
     // --- helpers ---
 
