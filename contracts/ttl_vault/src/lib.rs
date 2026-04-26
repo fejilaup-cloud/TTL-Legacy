@@ -990,6 +990,71 @@ impl TtlVaultContract {
         Ok(decayed_ttl)
     }
 
+    /// Synchronizes TTL across multiple vaults owned by the caller.
+    ///
+    /// Extends TTL for all specified vaults in a single transaction. This is more
+    /// efficient than calling `check_in` multiple times. All vaults must be owned
+    /// by the caller and in Locked status.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_ids` - Vector of vault IDs to synchronize
+    /// * `caller` - The address of the caller (must be the owner of all vaults)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::Paused` - If the contract is paused
+    /// * `ContractError::VaultNotFound` - If any vault does not exist
+    /// * `ContractError::NotOwner` - If caller is not the owner of any vault
+    /// * `ContractError::AlreadyReleased` - If any vault is not in Locked status
+    /// * `ContractError::MaxTtlExceeded` - If any vault would exceed max TTL
+    pub fn sync_vault_ttls(
+        env: Env,
+        vault_ids: Vec<u64>,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+        caller.require_auth();
+
+        // Validate all vaults before mutating state
+        for vault_id in vault_ids.iter() {
+            let vault = Self::try_load_vault(&env, vault_id)
+                .ok_or(ContractError::VaultNotFound)?;
+            if caller != vault.owner {
+                return Err(ContractError::NotOwner);
+            }
+            if vault.status != ReleaseStatus::Locked {
+                return Err(ContractError::AlreadyReleased);
+            }
+            
+            // Check max TTL constraint
+            let max_ttl = Self::get_max_ttl_seconds(env.clone());
+            let now = env.ledger().timestamp();
+            let deadline = now + vault.check_in_interval;
+            let max_deadline = now + max_ttl;
+            if deadline > max_deadline {
+                return Err(ContractError::MaxTtlExceeded);
+            }
+        }
+
+        // All validations passed — apply check-ins
+        let now = env.ledger().timestamp();
+        for vault_id in vault_ids.iter() {
+            let mut vault = Self::load_vault(&env, vault_id);
+            vault.last_check_in = now;
+            Self::save_vault(&env, vault_id, &vault);
+            env.events().publish((CHECK_IN_TOPIC, vault_id), now);
+        }
+        
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((SYNC_TTL_TOPIC,), vault_ids.len());
+        Ok(())
+    }
+
     // --- Task 1: ping_expiry ---
 
     /// Checks the remaining TTL and emits a warning event if near expiry.
