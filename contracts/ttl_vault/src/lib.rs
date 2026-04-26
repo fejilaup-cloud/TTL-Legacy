@@ -340,10 +340,79 @@ impl TtlVaultContract {
         let key = DataKey::TokenWhitelist(token_address);
         env.storage().persistent().get(&key).unwrap_or(false)
     }
+
+    // --- Cross-Chain Bridge Support (Issue #366) ---
+
+    /// Registers a bridge for cross-chain support.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `chain_id` - The target chain ID
+    /// * `bridge_address` - The bridge contract address
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the admin
+    pub fn register_bridge(env: Env, chain_id: u32, bridge_address: Address) {
+        Self::require_admin(&env);
+        let config = BridgeConfig {
+            chain_id,
+            bridge_address: bridge_address.clone(),
+            is_active: true,
+        };
+        let key = DataKey::BridgeConfig(chain_id);
+        env.storage().persistent().set(&key, &config);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((symbol_short!("br_reg"),), (chain_id, bridge_address));
+    }
+
+    /// Deactivates a bridge.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `chain_id` - The chain ID to deactivate
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the admin
+    pub fn deactivate_bridge(env: Env, chain_id: u32) {
+        Self::require_admin(&env);
+        let key = DataKey::BridgeConfig(chain_id);
+        if let Some(mut config) = env.storage().persistent().get::<DataKey, BridgeConfig>(&key) {
+            config.is_active = false;
+            env.storage().persistent().set(&key, &config);
+            env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        }
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((symbol_short!("br_deact"),), chain_id);
+    }
+
+    /// Gets the bridge configuration for a chain.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `chain_id` - The chain ID
+    ///
     /// # Returns
-    /// `Some(seconds)` with the maximum interval, or `None` if not set
-    pub fn get_max_check_in_interval(env: Env) -> Option<u64> {
-        env.storage().instance().get(&DataKey::MaxCheckInInterval)
+    /// The bridge configuration if it exists
+    pub fn get_bridge_config(env: Env, chain_id: u32) -> Option<BridgeConfig> {
+        let key = DataKey::BridgeConfig(chain_id);
+        env.storage().persistent().get(&key)
+    }
+
+    /// Checks if a bridge is active.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `chain_id` - The chain ID
+    ///
+    /// # Returns
+    /// `true` if the bridge is active, `false` otherwise
+    pub fn is_bridge_active(env: Env, chain_id: u32) -> bool {
+        if let Some(config) = Self::get_bridge_config(env, chain_id) {
+            config.is_active
+        } else {
+            false
+        }
     }
 
     /// Admin-only. Upgrades the contract to a new WASM hash.
@@ -1282,6 +1351,124 @@ impl TtlVaultContract {
             env.events().publish((SET_BENEFICIARIES_TOPIC, vault_id), beneficiaries);
             Ok(())
         }
+
+    /// Adds a single beneficiary to a vault's multi-beneficiary split.
+    ///
+    /// This function adds a new beneficiary with the specified BPS allocation.
+    /// The total BPS across all beneficiaries must not exceed 10,000 (100%).
+    /// If adding this beneficiary would exceed 10,000 BPS, the operation fails.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The address of the caller (must be the vault owner)
+    /// * `address` - The beneficiary address to add
+    /// * `percentage` - The BPS allocation (0-10000)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    /// * `ContractError::InvalidBps` - If total BPS would exceed 10,000
+    /// * `ContractError::InvalidBeneficiary` - If address is the vault owner
+    pub fn add_beneficiary(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        address: Address,
+        percentage: u32,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        if address == vault.owner {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+        
+        // Check if beneficiary already exists
+        for entry in vault.beneficiaries.iter() {
+            if entry.address == address {
+                return Err(ContractError::InvalidBeneficiary);
+            }
+        }
+        
+        // Calculate total BPS after adding new beneficiary
+        let current_total: u32 = vault.beneficiaries.iter().map(|e| e.bps).sum();
+        if current_total + percentage > 10_000 {
+            return Err(ContractError::InvalidBps);
+        }
+        
+        vault.beneficiaries.push_back(BeneficiaryEntry {
+            address: address.clone(),
+            bps: percentage,
+        });
+        
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((BENEFICIARY_UPDATED_TOPIC, vault_id), (address, percentage));
+        Ok(())
+    }
+
+    /// Removes a beneficiary from a vault's multi-beneficiary split.
+    ///
+    /// This function removes an existing beneficiary from the vault's beneficiaries list.
+    /// If the beneficiary is not found, the operation fails.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The address of the caller (must be the vault owner)
+    /// * `address` - The beneficiary address to remove
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    /// * `ContractError::InvalidBeneficiary` - If beneficiary is not found
+    pub fn remove_beneficiary(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        address: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        
+        let mut found = false;
+        let mut new_beneficiaries = Vec::new(&env);
+        for entry in vault.beneficiaries.iter() {
+            if entry.address != address {
+                new_beneficiaries.push_back(entry);
+            } else {
+                found = true;
+            }
+        }
+        
+        if !found {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+        
+        vault.beneficiaries = new_beneficiaries;
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((BENEFICIARY_UPDATED_TOPIC, vault_id), address);
+        Ok(())
+    }
 
     // --- Task 4: update_metadata ---
 

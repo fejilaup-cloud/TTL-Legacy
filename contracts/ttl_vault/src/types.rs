@@ -113,6 +113,15 @@ pub struct BeneficiaryEntry {
     pub bps: u32,
 }
 
+/// Bridge configuration for cross-chain support.
+#[contracttype]
+#[derive(Clone)]
+pub struct BridgeConfig {
+    pub chain_id: u32,
+    pub bridge_address: Address,
+    pub is_active: bool,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct Vault {

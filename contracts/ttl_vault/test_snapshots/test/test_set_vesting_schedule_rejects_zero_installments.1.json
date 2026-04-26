@@ -87,7 +87,8 @@
                 },
                 {
                   "u64": 100
-                }
+                },
+                "void"
               ]
             }
           },
@@ -588,6 +589,14 @@
                             "symbol": "Locked"
                           }
                         ]
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "token_address"
+                      },
+                      "val": {
+                        "address": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG"
                       }
                     }
                   ]
@@ -1292,7 +1301,8 @@
                 },
                 {
                   "u64": 100
-                }
+                },
+                "void"
               ]
             }
           }
