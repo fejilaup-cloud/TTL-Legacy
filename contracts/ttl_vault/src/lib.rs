@@ -12,7 +12,8 @@ use types::{
     CLAIM_VEST_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC, PAUSE_TOPIC, PING_EXPIRY_TOPIC,
     RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MAX_INTERVAL_TOPIC, SET_MIN_INTERVAL_TOPIC,
     SET_VESTING_TOPIC, UNPAUSE_TOPIC, UPDATE_INTERVAL_TOPIC, UPDATE_METADATA_TOPIC,
-    VAULT_CREATED_TOPIC, WITHDRAW_TOPIC, MAX_METADATA_LEN,
+    VAULT_CREATED_TOPIC, WITHDRAW_TOPIC, MAX_METADATA_LEN, MAX_NAME_LEN, MAX_DESCRIPTION_LEN,
+    MAX_NOTES_LEN,
 };
 
 #[cfg(test)]
@@ -1048,6 +1049,68 @@ impl TtlVaultContract {
             env.events().publish((UPDATE_METADATA_TOPIC, vault_id), metadata);
             Ok(())
         }
+
+    /// Sets the vault name, description, and notes fields.
+    /// 
+    /// # Arguments
+    /// * `vault_id` - The vault ID
+    /// * `caller` - The address calling this function (must be vault owner)
+    /// * `name` - Vault name/title (max 64 chars)
+    /// * `description` - Vault description (max 512 chars)
+    /// * `notes` - Notes/instructions for beneficiary (max 1024 chars)
+    /// 
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    /// * `ContractError::InvalidAmount` - If any field exceeds size limits
+    pub fn set_vault_notes(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        name: String,
+        description: String,
+        notes: String,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        
+        // Validate field lengths
+        if name.len() > MAX_NAME_LEN {
+            return Err(ContractError::InvalidAmount);
+        }
+        if description.len() > MAX_DESCRIPTION_LEN {
+            return Err(ContractError::InvalidAmount);
+        }
+        if notes.len() > MAX_NOTES_LEN {
+            return Err(ContractError::InvalidAmount);
+        }
+        
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        
+        vault.name = name;
+        vault.description = description;
+        vault.notes = notes;
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Gets the vault metadata fields (name, description, notes).
+    /// 
+    /// # Arguments
+    /// * `vault_id` - The vault ID
+    /// 
+    /// # Returns
+    /// A tuple of (name, description, notes)
+    pub fn get_vault_notes(env: Env, vault_id: u64) -> (String, String, String) {
+        let vault = Self::load_vault(&env, vault_id);
+        (vault.name, vault.description, vault.notes)
+    }
 
     // --- Task 5: vesting schedules ---
 
