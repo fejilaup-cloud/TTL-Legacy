@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, symbol_short, Address, String, Symbol, Vec};
+use soroban_sdk::{contracttype, symbol_short, Address, Bytes, String, Symbol, Vec};
 
 pub const RELEASE_TOPIC: Symbol = symbol_short!("release");
 pub const VAULT_CREATED_TOPIC: Symbol = symbol_short!("v_created");
@@ -18,10 +18,10 @@ pub const PAUSE_TOPIC: Symbol = symbol_short!("pause");
 pub const UNPAUSE_TOPIC: Symbol = symbol_short!("unpause");
 pub const SET_VESTING_TOPIC: Symbol = symbol_short!("set_vest");
 pub const CLAIM_VEST_TOPIC: Symbol = symbol_short!("clm_vest");
-pub const SET_RECOVERY_TOPIC: Symbol = symbol_short!("set_rec");
-pub const RECOVERY_EXTEND_TOPIC: Symbol = symbol_short!("rec_ext");
-pub const VAULT_CLONED_TOPIC: Symbol = symbol_short!("cloned");
-pub const VAULT_EXPIRY_WARNING_TOPIC: Symbol = symbol_short!("exp_warn");
+pub const PAUSE_VAULT_TOPIC: Symbol = symbol_short!("v_pause");
+pub const RESUME_VAULT_TOPIC: Symbol = symbol_short!("v_resume");
+pub const SET_METADATA_TOPIC: Symbol = symbol_short!("set_meta");
+pub const INHERITANCE_TOPIC: Symbol = symbol_short!("inherit");
 
 /// Warning threshold in seconds. If TTL remaining < this value, ping_expiry emits an event.
 pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
@@ -41,6 +41,9 @@ pub const MAX_DESCRIPTION_LEN: u32 = 512;
 /// Maximum length for vault notes
 pub const MAX_NOTES_LEN: u32 = 1024;
 
+/// Maximum length for custom metadata bytes (2KB) - Issue #378
+pub const MAX_CUSTOM_METADATA_LEN: u32 = 2048;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -57,8 +60,8 @@ pub enum DataKey {
     Version,
     VestingSchedule(u64),
     TokenWhitelist(Address),
-    RecoveryContact(u64),
-    VaultAuditLog(u64),
+    VaultMetadata(u64),
+    ParentVault(u64),
 }
 
 /// A vesting schedule attached to a vault.
@@ -89,6 +92,14 @@ pub enum ReleaseStatus {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReleaseCondition {
+    OnExpiry,
+    OnProof(u32),
+    Tranche(Vec<(u64, u32)>),
+}
+
+#[contracttype]
 #[derive(Clone)]
 pub struct ReleaseEvent {
     pub vault_id: u64,
@@ -105,14 +116,13 @@ pub struct BeneficiaryEntry {
     pub bps: u32,
 }
 
-/// Audit log entry for vault operations
+/// Bridge configuration for cross-chain support.
 #[contracttype]
 #[derive(Clone)]
-pub struct AuditEntry {
-    pub timestamp: u64,
-    pub operation: String,
-    pub actor: Address,
-    pub details: String,
+pub struct BridgeConfig {
+    pub chain_id: u32,
+    pub bridge_address: Address,
+    pub is_active: bool,
 }
 
 #[contracttype]
@@ -133,6 +143,12 @@ pub struct Vault {
     pub metadata: String,
     /// Token contract address for this vault. Uses default XLM token if not specified.
     pub token_address: Address,
-    /// Optional recovery contact who can extend TTL if owner loses access
-    pub recovery_contact: Option<Address>,
+    /// Custom metadata as bytes (max 2KB) - Issue #378
+    pub custom_metadata: Bytes,
+    /// Whether the vault is paused - Issue #380
+    pub is_paused: bool,
+    /// Release condition for the vault - Issue #379
+    pub release_condition: ReleaseCondition,
+    /// Parent vault ID for inheritance chain - Issue #381
+    pub parent_vault_id: Option<u64>,
 }
