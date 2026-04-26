@@ -2555,3 +2555,225 @@ fn test_security_interval_bounds_validation() {
     let vault_id = client.create_vault(&owner, &beneficiary, &5000u64, &None);
     assert!(vault_id > 0);
 }
+
+
+// ---- Issue #395: Passkey Usage Analytics Tests ----
+
+#[test]
+fn test_passkey_usage_logging() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    
+    // Create a passkey hash
+    let passkey_hash = BytesN::<32>::from_array(&env, &[1u8; 32]);
+    
+    // Check-in with passkey
+    client.check_in(&vault_id, &owner, &passkey_hash);
+    
+    // Get passkey usage
+    let usage = client.get_passkey_usage(&vault_id);
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage.get(0).unwrap().passkey_hash, passkey_hash);
+}
+
+#[test]
+fn test_passkey_usage_multiple_entries() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    
+    let passkey_hash_1 = BytesN::<32>::from_array(&env, &[1u8; 32]);
+    let passkey_hash_2 = BytesN::<32>::from_array(&env, &[2u8; 32]);
+    
+    // First check-in
+    client.check_in(&vault_id, &owner, &passkey_hash_1);
+    env.ledger().with_mut(|l| l.timestamp += 50);
+    
+    // Second check-in with different passkey
+    client.check_in(&vault_id, &owner, &passkey_hash_2);
+    
+    // Get passkey usage
+    let usage = client.get_passkey_usage(&vault_id);
+    assert_eq!(usage.len(), 2);
+    assert_eq!(usage.get(0).unwrap().passkey_hash, passkey_hash_1);
+    assert_eq!(usage.get(1).unwrap().passkey_hash, passkey_hash_2);
+}
+
+// ---- Issue #396: Passkey Expiry Tests ----
+
+#[test]
+fn test_passkey_expiry_enforcement() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let passkey_hash = BytesN::<32>::from_array(&env, &[1u8; 32]);
+    
+    // Set passkey expiry to current time + 50 seconds
+    let expiry = env.ledger().timestamp() + 50;
+    client.extend_passkey_expiry(&vault_id, &owner, &passkey_hash, &expiry);
+    
+    // Check-in should succeed before expiry
+    client.check_in(&vault_id, &owner, &passkey_hash);
+    
+    // Advance time past expiry
+    env.ledger().with_mut(|l| l.timestamp += 100);
+    
+    // Check-in should fail with expired passkey
+    let result = client.try_check_in(&vault_id, &owner, &passkey_hash);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_extend_passkey_expiry() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let passkey_hash = BytesN::<32>::from_array(&env, &[1u8; 32]);
+    
+    // Set initial expiry
+    let initial_expiry = env.ledger().timestamp() + 50;
+    client.extend_passkey_expiry(&vault_id, &owner, &passkey_hash, &initial_expiry);
+    
+    // Verify expiry is set
+    let expiry = client.get_passkey_expiry(&vault_id, &passkey_hash);
+    assert_eq!(expiry, Some(initial_expiry));
+    
+    // Extend expiry
+    let new_expiry = env.ledger().timestamp() + 200;
+    client.extend_passkey_expiry(&vault_id, &owner, &passkey_hash, &new_expiry);
+    
+    // Verify new expiry
+    let updated_expiry = client.get_passkey_expiry(&vault_id, &passkey_hash);
+    assert_eq!(updated_expiry, Some(new_expiry));
+}
+
+// ---- Issue #397: Beneficiary Acceptance Flow Tests ----
+
+#[test]
+fn test_beneficiary_acceptance_flow() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    
+    // Initial status should be Pending
+    let status = client.get_beneficiary_status(&vault_id);
+    assert_eq!(status, BeneficiaryStatus::Pending);
+    
+    // Beneficiary accepts
+    client.accept_beneficiary_role(&vault_id, &beneficiary);
+    
+    // Status should be Accepted
+    let status = client.get_beneficiary_status(&vault_id);
+    assert_eq!(status, BeneficiaryStatus::Accepted);
+}
+
+#[test]
+fn test_beneficiary_decline_flow() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    
+    // Beneficiary declines
+    client.decline_beneficiary_role(&vault_id, &beneficiary);
+    
+    // Status should be Declined
+    let status = client.get_beneficiary_status(&vault_id);
+    assert_eq!(status, BeneficiaryStatus::Declined);
+}
+
+#[test]
+fn test_release_blocked_when_beneficiary_declined() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    
+    // Deposit funds
+    client.deposit(&vault_id, &owner, &500i128);
+    
+    // Beneficiary declines
+    client.decline_beneficiary_role(&vault_id, &beneficiary);
+    
+    // Advance time past expiry
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    
+    // Trigger release should fail
+    let result = client.try_trigger_release(&vault_id);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_release_succeeds_when_beneficiary_accepted() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    
+    // Deposit funds
+    client.deposit(&vault_id, &owner, &500i128);
+    
+    // Beneficiary accepts
+    client.accept_beneficiary_role(&vault_id, &beneficiary);
+    
+    // Advance time past expiry
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    
+    // Trigger release should succeed
+    client.trigger_release(&vault_id);
+    
+    // Verify funds transferred
+    let token_client = token::Client::new(&env, &token_address);
+    assert_eq!(token_client.balance(&beneficiary), 500i128);
+}
+
+// ---- Issue #398: Beneficiary Notification System Tests ----
+
+#[test]
+fn test_get_vaults_as_beneficiary() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    // Create multiple vaults with same beneficiary
+    let vault_id_1 = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let vault_id_2 = client.create_vault(&owner, &beneficiary, &200u64, &None);
+    
+    // Get vaults as beneficiary
+    let vaults = client.get_vaults_as_beneficiary(&beneficiary);
+    assert_eq!(vaults.len(), 2);
+    assert_eq!(vaults.get(0).unwrap(), vault_id_1);
+    assert_eq!(vaults.get(1).unwrap(), vault_id_2);
+}
+
+#[test]
+fn test_get_vaults_as_beneficiary_empty() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let other_beneficiary = Address::generate(&env);
+    
+    // Create vault with different beneficiary
+    client.create_vault(&owner, &beneficiary, &100u64, &None);
+    
+    // Get vaults for non-beneficiary
+    let vaults = client.get_vaults_as_beneficiary(&other_beneficiary);
+    assert_eq!(vaults.len(), 0);
+}
+
+#[test]
+fn test_beneficiary_assigned_event_emitted() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    // Create vault
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    
+    // Check events
+    let events = env.events().all();
+    
+    // Should have beneficiary assigned event
+    let has_beneficiary_event = events.iter().any(|e| {
+        if let Ok((topic, _)) = e.clone().try_into_val::<_, (Symbol, Address)>(&env) {
+            topic == symbol_short!("ben_asgn")
+        } else {
+            false
+        }
+    });
+    
+    assert!(has_beneficiary_event);
+}
