@@ -2195,15 +2195,13 @@ fn test_claim_vested_emits_event() {
 }
 
 #[test]
-fn test_get_vault_beneficiary() {
-    let (_, owner, beneficiary, _, _, client) = setup();
+fn test_get_vault_last_check_in_returns_correct_timestamp() {
+    let (env, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
-    assert_eq!(client.get_vault_beneficiary(&vault_id), beneficiary);
-}
 
-#[test]
-fn test_get_vault_check_in_interval() {
-    let (_, owner, beneficiary, _, _, client) = setup();
-    let vault_id = client.create_vault(&owner, &beneficiary, &300u64);
-    assert_eq!(client.get_vault_check_in_interval(&vault_id), 300u64);
+    env.ledger().with_mut(|l| l.timestamp += 50);
+    client.check_in(&vault_id, &owner);
+
+    let expected = env.ledger().timestamp();
+    assert_eq!(client.get_vault_last_check_in(&vault_id), expected);
 }

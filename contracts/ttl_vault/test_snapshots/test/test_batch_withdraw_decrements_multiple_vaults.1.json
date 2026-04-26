@@ -761,6 +761,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "description"
+                      },
+                      "val": {
+                        "string": ""
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "last_check_in"
                       },
                       "val": {
@@ -770,6 +778,22 @@
                     {
                       "key": {
                         "symbol": "metadata"
+                      },
+                      "val": {
+                        "string": ""
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "name"
+                      },
+                      "val": {
+                        "string": ""
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "notes"
                       },
                       "val": {
                         "string": ""
@@ -886,6 +910,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "description"
+                      },
+                      "val": {
+                        "string": ""
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "last_check_in"
                       },
                       "val": {
@@ -895,6 +927,22 @@
                     {
                       "key": {
                         "symbol": "metadata"
+                      },
+                      "val": {
+                        "string": ""
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "name"
+                      },
+                      "val": {
+                        "string": ""
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "notes"
                       },
                       "val": {
                         "string": ""
@@ -2581,6 +2629,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "description"
+                  },
+                  "val": {
+                    "string": ""
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "last_check_in"
                   },
                   "val": {
@@ -2590,6 +2646,22 @@
                 {
                   "key": {
                     "symbol": "metadata"
+                  },
+                  "val": {
+                    "string": ""
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "name"
+                  },
+                  "val": {
+                    "string": ""
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "notes"
                   },
                   "val": {
                     "string": ""
@@ -2710,6 +2782,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "description"
+                  },
+                  "val": {
+                    "string": ""
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "last_check_in"
                   },
                   "val": {
@@ -2719,6 +2799,22 @@
                 {
                   "key": {
                     "symbol": "metadata"
+                  },
+                  "val": {
+                    "string": ""
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "name"
+                  },
+                  "val": {
+                    "string": ""
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "notes"
                   },
                   "val": {
                     "string": ""
