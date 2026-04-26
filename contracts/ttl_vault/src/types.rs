@@ -177,3 +177,20 @@ pub struct Vault {
     /// Primary passkey hash for backwards compatibility - Issue #392, #394
     pub passkey_hash: Option<BytesN<32>>,
 }
+
+/// Passkey usage entry for tracking check-ins - Issue #395
+#[contracttype]
+#[derive(Clone)]
+pub struct PasskeyUsageEntry {
+    pub passkey_hash: BytesN<32>,
+    pub timestamp: u64,
+}
+
+/// Beneficiary status enum - Issue #397
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum BeneficiaryStatus {
+    Pending,
+    Accepted,
+    Declined,
+}
