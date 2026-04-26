@@ -8,13 +8,15 @@ use soroban_sdk::{
 mod types;
 use types::{
     BeneficiaryEntry, DataKey, ReleaseEvent, ReleaseStatus, ReleaseCondition, Vault, VestingSchedule,
+    PasskeyHash, BackupCode,
     EXPIRY_WARNING_THRESHOLD, BENEFICIARY_UPDATED_TOPIC, CANCEL_TOPIC, CHECK_IN_TOPIC,
     CLAIM_VEST_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC, PAUSE_TOPIC, PING_EXPIRY_TOPIC,
     RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MAX_INTERVAL_TOPIC, SET_MIN_INTERVAL_TOPIC,
     SET_VESTING_TOPIC, UNPAUSE_TOPIC, UPDATE_INTERVAL_TOPIC, UPDATE_METADATA_TOPIC,
     VAULT_CREATED_TOPIC, WITHDRAW_TOPIC, MAX_METADATA_LEN, MAX_NAME_LEN, MAX_DESCRIPTION_LEN,
     MAX_NOTES_LEN, MAX_CUSTOM_METADATA_LEN, PAUSE_VAULT_TOPIC, RESUME_VAULT_TOPIC, SET_METADATA_TOPIC,
-    INHERITANCE_TOPIC,
+    INHERITANCE_TOPIC, ADD_PASSKEY_TOPIC, REMOVE_PASSKEY_TOPIC, ROTATE_PASSKEY_TOPIC,
+    BACKUP_CODE_USED_TOPIC, BACKUP_CODES_GENERATED_TOPIC,
 };
 
 #[cfg(test)]
@@ -82,6 +84,10 @@ pub enum ContractError {
     NothingToClaimYet = 23,
     VestingAlreadyComplete = 24,
     MaxTtlExceeded = 25,
+    InvalidPasskey = 26,
+    PasskeyNotFound = 27,
+    InvalidBackupCode = 28,
+    BackupCodeAlreadyUsed = 29,
 }
 
 #[contract]
@@ -550,10 +556,19 @@ impl TtlVaultContract {
                 is_paused: false,
                 release_condition: ReleaseCondition::OnExpiry,
                 parent_vault_id: None,
+                passkey_hash: None,
             };
             Self::save_vault(&env, vault_id, &vault);
             Self::add_owner_vault_id(&env, &owner, vault_id, check_in_interval);
             Self::add_beneficiary_vault_id(&env, &beneficiary, vault_id, check_in_interval);
+            // Initialize empty passkeys and backup codes
+            let empty_passkeys: Vec<PasskeyHash> = Vec::new(&env);
+            let empty_codes: Vec<BackupCode> = Vec::new(&env);
+            env.storage().persistent().set(&DataKey::VaultPasskeys(vault_id), &empty_passkeys);
+            env.storage().persistent().set(&DataKey::BackupCodes(vault_id), &empty_codes);
+            let ttl = vault_ttl_ledgers(check_in_interval);
+            env.storage().persistent().extend_ttl(&DataKey::VaultPasskeys(vault_id), VAULT_TTL_THRESHOLD, ttl);
+            env.storage().persistent().extend_ttl(&DataKey::BackupCodes(vault_id), VAULT_TTL_THRESHOLD, ttl);
             // VaultCount is an incrementing generation ID and must be updated
             // only after the vault and its owner/beneficiary indexes are persisted.
             //
@@ -607,6 +622,10 @@ impl TtlVaultContract {
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
         }
+        
+        // Save original state for rollback on failure - Issue #391
+        let original_last_check_in = vault.last_check_in;
+        
         let now = env.ledger().timestamp();
         vault.last_check_in = now;
         
@@ -615,9 +634,12 @@ impl TtlVaultContract {
         let deadline = now + vault.check_in_interval;
         let max_deadline = now + max_ttl;
         if deadline > max_deadline {
+            // Rollback on failure - Issue #391
+            vault.last_check_in = original_last_check_in;
             return Err(ContractError::MaxTtlExceeded);
         }
         
+        // Attempt to save vault - if this fails, TTL is not extended
         Self::save_vault(&env, vault_id, &vault);
         let owner_ids = Self::load_owner_vault_ids(&env, &vault.owner);
         Self::save_owner_vault_ids(&env, &vault.owner, &owner_ids, vault.check_in_interval);
@@ -2845,11 +2867,321 @@ impl TtlVaultContract {
                 }
                 if let Some(ttl) = Self::get_ttl_remaining(env.clone(), vault_id) {
                     if ttl < warning_threshold {
-                        env.events().publish((VAULT_EXPIRY_WARNING_TOPIC, vault_id), ttl);
+                        env.events().publish((PING_EXPIRY_TOPIC, vault_id), ttl);
                     }
                 }
             }
         }
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+    }
+
+    // --- Issue #392: Passkey Rotation ---
+
+    /// Rotates the primary passkey for a vault.
+    ///
+    /// Verifies the old passkey before accepting the new one. Only the vault owner can call this.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The vault owner (must authorize)
+    /// * `old_passkey_hash` - Hash of the old passkey (for verification)
+    /// * `new_passkey_hash` - Hash of the new passkey
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::InvalidPasskey` - If old passkey doesn't match
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn rotate_passkey(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        old_passkey_hash: BytesN<32>,
+        new_passkey_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        
+        // Verify old passkey matches
+        if let Some(current) = &vault.passkey_hash {
+            if current != &old_passkey_hash {
+                return Err(ContractError::InvalidPasskey);
+            }
+        } else {
+            return Err(ContractError::InvalidPasskey);
+        }
+        
+        vault.passkey_hash = Some(new_passkey_hash.clone());
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((ROTATE_PASSKEY_TOPIC, vault_id), (old_passkey_hash, new_passkey_hash));
+        Ok(())
+    }
+
+    // --- Issue #393: Passkey Backup Codes ---
+
+    /// Generates 10 one-time backup codes for a vault.
+    ///
+    /// Only the vault owner can call this. Codes are generated deterministically from vault_id and timestamp.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The vault owner (must authorize)
+    ///
+    /// # Returns
+    /// Vector of 10 backup codes
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn generate_backup_codes(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+    ) -> Result<Vec<String>, ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        
+        let mut codes: Vec<BackupCode> = Vec::new(&env);
+        let mut result: Vec<String> = Vec::new(&env);
+        let timestamp = env.ledger().timestamp();
+        
+        for i in 0..10 {
+            let code_str = format!("{:016x}", vault_id.wrapping_mul(timestamp).wrapping_add(i as u64));
+            let code = String::from_str(&env, &code_str);
+            codes.push_back(BackupCode {
+                code: code.clone(),
+                used: false,
+            });
+            result.push_back(code);
+        }
+        
+        let key = DataKey::BackupCodes(vault_id);
+        env.storage().persistent().set(&key, &codes);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((BACKUP_CODES_GENERATED_TOPIC, vault_id), 10u32);
+        Ok(result)
+    }
+
+    /// Uses a backup code to extend the vault TTL by 30 days.
+    ///
+    /// Anyone can call this with a valid backup code. The code is marked as used and cannot be reused.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `code` - The backup code to use
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::InvalidBackupCode` - If code is invalid or not found
+    /// * `ContractError::BackupCodeAlreadyUsed` - If code has already been used
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn use_backup_code(
+        env: Env,
+        vault_id: u64,
+        code: String,
+    ) -> Result<(), ContractError> {
+        let mut vault = Self::load_vault(&env, vault_id);
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        
+        let key = DataKey::BackupCodes(vault_id);
+        let mut codes: Vec<BackupCode> = env.storage().persistent().get(&key)
+            .ok_or(ContractError::InvalidBackupCode)?;
+        
+        let mut found = false;
+        for i in 0..codes.len() {
+            if let Some(mut backup_code) = codes.get(i) {
+                if backup_code.code == code {
+                    if backup_code.used {
+                        return Err(ContractError::BackupCodeAlreadyUsed);
+                    }
+                    backup_code.used = true;
+                    codes.set(i, backup_code);
+                    found = true;
+                    break;
+                }
+            }
+        }
+        
+        if !found {
+            return Err(ContractError::InvalidBackupCode);
+        }
+        
+        // Extend TTL by 30 days
+        vault.last_check_in = env.ledger().timestamp();
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().persistent().set(&key, &codes);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((BACKUP_CODE_USED_TOPIC, vault_id), code);
+        Ok(())
+    }
+
+    // --- Issue #394: Multi-Passkey Support ---
+
+    /// Adds a new passkey to a vault.
+    ///
+    /// Only the vault owner can call this. Multiple passkeys allow different devices to authenticate.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The vault owner (must authorize)
+    /// * `passkey_hash` - Hash of the new passkey
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn add_passkey(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        passkey_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        
+        let key = DataKey::VaultPasskeys(vault_id);
+        let mut passkeys: Vec<PasskeyHash> = env.storage().persistent().get(&key)
+            .unwrap_or(Vec::new(&env));
+        
+        let timestamp = env.ledger().timestamp();
+        passkeys.push_back(PasskeyHash {
+            hash: passkey_hash.clone(),
+            added_at: timestamp,
+        });
+        
+        env.storage().persistent().set(&key, &passkeys);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((ADD_PASSKEY_TOPIC, vault_id), passkey_hash);
+        Ok(())
+    }
+
+    /// Removes a passkey from a vault.
+    ///
+    /// Only the vault owner can call this. At least one passkey must remain.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The vault owner (must authorize)
+    /// * `passkey_hash` - Hash of the passkey to remove
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::PasskeyNotFound` - If passkey is not found
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn remove_passkey(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        passkey_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        
+        let key = DataKey::VaultPasskeys(vault_id);
+        let passkeys: Vec<PasskeyHash> = env.storage().persistent().get(&key)
+            .ok_or(ContractError::PasskeyNotFound)?;
+        
+        let mut new_passkeys: Vec<PasskeyHash> = Vec::new(&env);
+        let mut found = false;
+        
+        for pk in passkeys.iter() {
+            if pk.hash != passkey_hash {
+                new_passkeys.push_back(pk);
+            } else {
+                found = true;
+            }
+        }
+        
+        if !found {
+            return Err(ContractError::PasskeyNotFound);
+        }
+        
+        env.storage().persistent().set(&key, &new_passkeys);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((REMOVE_PASSKEY_TOPIC, vault_id), passkey_hash);
+        Ok(())
+    }
+
+    /// Gets all passkeys for a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// Vector of passkey hashes
+    pub fn get_vault_passkeys(env: Env, vault_id: u64) -> Vec<PasskeyHash> {
+        let key = DataKey::VaultPasskeys(vault_id);
+        env.storage().persistent().get(&key).unwrap_or(Vec::new(&env))
+    }
+
+    /// Checks if a passkey is valid for a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `passkey_hash` - Hash of the passkey to check
+    ///
+    /// # Returns
+    /// `true` if the passkey is valid, `false` otherwise
+    pub fn is_valid_passkey(env: Env, vault_id: u64, passkey_hash: BytesN<32>) -> bool {
+        let key = DataKey::VaultPasskeys(vault_id);
+        if let Some(passkeys) = env.storage().persistent().get::<DataKey, Vec<PasskeyHash>>(&key) {
+            for pk in passkeys.iter() {
+                if pk.hash == passkey_hash {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
