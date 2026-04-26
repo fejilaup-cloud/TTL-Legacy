@@ -40,6 +40,7 @@ pub enum DataKey {
     MaxCheckInInterval,
     Version,
     VestingSchedule(u64),
+    TokenWhitelist(Address),
 }
 
 /// A vesting schedule attached to a vault.
@@ -102,4 +103,6 @@ pub struct Vault {
     pub beneficiaries: Vec<BeneficiaryEntry>,
     /// Optional short metadata string (label or IPFS hash).
     pub metadata: String,
+    /// Token contract address for this vault. Uses default XLM token if not specified.
+    pub token_address: Address,
 }
