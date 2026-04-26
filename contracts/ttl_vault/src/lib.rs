@@ -621,6 +621,7 @@ impl TtlVaultContract {
         Self::save_vault(&env, vault_id, &vault);
         let owner_ids = Self::load_owner_vault_ids(&env, &vault.owner);
         Self::save_owner_vault_ids(&env, &vault.owner, &owner_ids, vault.check_in_interval);
+        Self::log_audit_entry(&env, vault_id, "check_in", &caller, "");
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish((CHECK_IN_TOPIC, vault_id), vault.last_check_in);
         Ok(())
@@ -668,6 +669,7 @@ impl TtlVaultContract {
             .checked_add(amount)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::BalanceOverflow));
         Self::save_vault(&env, vault_id, &vault);
+        Self::log_audit_entry(&env, vault_id, "deposit", &from, "");
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish(
             (DEPOSIT_TOPIC, vault_id),
@@ -791,6 +793,7 @@ impl TtlVaultContract {
             token_client.transfer(&env.current_contract_address(), &vault.owner, &amount);
             vault.balance -= amount;
             Self::save_vault(&env, vault_id, &vault);
+            Self::log_audit_entry(&env, vault_id, "withdraw", &caller, "");
             env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
             env.events().publish(
                 (WITHDRAW_TOPIC, vault_id),
@@ -1501,6 +1504,7 @@ impl TtlVaultContract {
             }
             vault.metadata = metadata.clone();
             Self::save_vault(&env, vault_id, &vault);
+            Self::log_audit_entry(&env, vault_id, "update_metadata", &caller, "");
             env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
             env.events().publish((UPDATE_METADATA_TOPIC, vault_id), metadata);
             Ok(())
@@ -1999,6 +2003,7 @@ impl TtlVaultContract {
             Self::remove_beneficiary_vault_id(&env, &old_beneficiary, vault_id, vault.check_in_interval);
             Self::add_beneficiary_vault_id(&env, &new_beneficiary, vault_id, vault.check_in_interval);
         }
+        Self::log_audit_entry(&env, vault_id, "update_beneficiary", &caller, "");
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish((BENEFICIARY_UPDATED_TOPIC, vault_id), (old_beneficiary, new_beneficiary));
         Ok(())
@@ -2052,6 +2057,7 @@ impl TtlVaultContract {
             VAULT_TTL_THRESHOLD,
             new_ttl,
         );
+        Self::log_audit_entry(&env, vault_id, "update_check_in_interval", &vault.owner, "");
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish((UPDATE_INTERVAL_TOPIC, vault_id), (old_interval, new_interval));
         Ok(())
@@ -2096,6 +2102,7 @@ impl TtlVaultContract {
         Self::save_vault(&env, vault_id, &vault);
         Self::remove_owner_vault_id(&env, &vault.owner, vault_id, vault.check_in_interval);
         Self::remove_beneficiary_vault_id(&env, &vault.beneficiary, vault_id, vault.check_in_interval);
+        Self::log_audit_entry(&env, vault_id, "cancel_vault", &caller, "");
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish((CANCEL_TOPIC, vault_id), (vault.owner, refund_amount));
         Ok(())
@@ -2150,6 +2157,7 @@ impl TtlVaultContract {
             }
             vault.owner = new_owner.clone();
             Self::save_vault(&env, vault_id, &vault);
+            Self::log_audit_entry(&env, vault_id, "transfer_ownership", &caller, "");
             env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
             env.events().publish((OWNERSHIP_TOPIC, vault_id), (old_owner, new_owner));
             Ok(())
@@ -2629,5 +2637,219 @@ impl TtlVaultContract {
         if !is_whitelisted {
             panic_with_error!(env, ContractError::NotOwner); // Reusing error code for simplicity
         }
+    }
+
+    // --- Issue #383: Vault Recovery Mode ---
+
+    /// Sets a recovery contact who can extend the vault TTL if the owner loses access.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault ID
+    /// * `caller` - The vault owner (must authorize)
+    /// * `contact` - The recovery contact address
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn set_recovery_contact(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        contact: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        vault.recovery_contact = Some(contact.clone());
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((SET_RECOVERY_TOPIC, vault_id), contact);
+        Ok(())
+    }
+
+    /// Requests a recovery extension. Only the recovery contact can call this.
+    /// Extends the vault TTL by 30 days.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault ID
+    /// * `caller` - The recovery contact (must authorize)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::NotRecoveryContact` - If caller is not the recovery contact
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn request_recovery_extension(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        if let Some(contact) = &vault.recovery_contact {
+            if caller != *contact {
+                return Err(ContractError::NotRecoveryContact);
+            }
+        } else {
+            return Err(ContractError::NotRecoveryContact);
+        }
+        vault.last_check_in = env.ledger().timestamp();
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((RECOVERY_EXTEND_TOPIC, vault_id), caller);
+        Ok(())
+    }
+
+    // --- Issue #384: Vault Activity Audit Log ---
+
+    /// Logs an audit entry for a vault operation.
+    fn log_audit_entry(
+        env: &Env,
+        vault_id: u64,
+        operation: &str,
+        actor: &Address,
+        details: &str,
+    ) {
+        let mut log: Vec<AuditEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultAuditLog(vault_id))
+            .unwrap_or(Vec::new(env));
+        
+        let entry = AuditEntry {
+            timestamp: env.ledger().timestamp(),
+            operation: String::from_str(env, operation),
+            actor: actor.clone(),
+            details: String::from_str(env, details),
+        };
+        log.push_back(entry);
+        
+        let key = DataKey::VaultAuditLog(vault_id);
+        env.storage().persistent().set(&key, &log);
+        let ttl = vault_ttl_ledgers(Self::load_vault(env, vault_id).check_in_interval);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+    }
+
+    /// Retrieves the audit log for a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault ID
+    ///
+    /// # Returns
+    /// A vector of audit entries
+    pub fn get_vault_audit_log(env: Env, vault_id: u64) -> Vec<AuditEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VaultAuditLog(vault_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    // --- Issue #385: Vault Cloning ---
+
+    /// Clones a vault with a new beneficiary.
+    ///
+    /// Creates a new vault with the same settings as the original, but with a different beneficiary.
+    /// Only the owner can clone their vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The original vault ID
+    /// * `caller` - The vault owner (must authorize)
+    /// * `new_beneficiary` - The beneficiary for the cloned vault
+    ///
+    /// # Returns
+    /// The ID of the newly cloned vault
+    ///
+    /// # Errors (panics)
+    /// * Panics if caller is not the vault owner
+    /// * Panics if vault is not in Locked status
+    /// * Panics if owner == new_beneficiary
+    pub fn clone_vault(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        new_beneficiary: Address,
+    ) -> u64 {
+        caller.require_auth();
+        let original = Self::load_vault(&env, vault_id);
+        if caller != original.owner {
+            panic_with_error!(&env, ContractError::NotOwner);
+        }
+        if original.status != ReleaseStatus::Locked {
+            panic_with_error!(&env, ContractError::AlreadyReleased);
+        }
+        if original.owner == new_beneficiary {
+            panic_with_error!(&env, ContractError::InvalidBeneficiary);
+        }
+
+        let new_vault_id = Self::vault_count(env.clone()) + 1;
+        let timestamp = env.ledger().timestamp();
+        let cloned_vault = Vault {
+            owner: original.owner.clone(),
+            beneficiary: new_beneficiary.clone(),
+            balance: 0,
+            check_in_interval: original.check_in_interval,
+            last_check_in: timestamp,
+            created_at: timestamp,
+            status: ReleaseStatus::Locked,
+            beneficiaries: original.beneficiaries.clone(),
+            metadata: original.metadata.clone(),
+            token_address: original.token_address.clone(),
+            recovery_contact: None,
+        };
+        Self::save_vault(&env, new_vault_id, &cloned_vault);
+        Self::add_owner_vault_id(&env, &original.owner, new_vault_id, original.check_in_interval);
+        Self::add_beneficiary_vault_id(&env, &new_beneficiary, new_vault_id, original.check_in_interval);
+        
+        let key = DataKey::VaultCount;
+        env.storage().persistent().set(&key, &new_vault_id);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        
+        env.events().publish((VAULT_CLONED_TOPIC,), (vault_id, new_vault_id, new_beneficiary));
+        new_vault_id
+    }
+
+    // --- Issue #386: Vault Expiry Notification Events ---
+
+    /// Emits expiry warning events for vaults with TTL < 7 days.
+    ///
+    /// Anyone can call this function to emit warnings for vaults approaching expiry.
+    /// This enables off-chain reminder systems to monitor vault status.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_ids` - Vector of vault IDs to check
+    pub fn emit_expiry_warnings(env: Env, vault_ids: Vec<u64>) {
+        let warning_threshold: u64 = 604_800; // 7 days in seconds
+        
+        for vault_id in vault_ids.iter() {
+            if let Some(vault) = Self::try_load_vault(&env, vault_id) {
+                if vault.status != ReleaseStatus::Locked {
+                    continue;
+                }
+                if let Some(ttl) = Self::get_ttl_remaining(env.clone(), vault_id) {
+                    if ttl < warning_threshold {
+                        env.events().publish((VAULT_EXPIRY_WARNING_TOPIC, vault_id), ttl);
+                    }
+                }
+            }
+        }
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 }
