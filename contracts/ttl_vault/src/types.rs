@@ -114,4 +114,10 @@ pub struct Vault {
     pub metadata: String,
     /// Token contract address for this vault. Uses default XLM token if not specified.
     pub token_address: Address,
+    /// Vault name/title (max 64 chars).
+    pub name: String,
+    /// Vault description (max 512 chars).
+    pub description: String,
+    /// Notes/instructions for beneficiary (max 1024 chars).
+    pub notes: String,
 }

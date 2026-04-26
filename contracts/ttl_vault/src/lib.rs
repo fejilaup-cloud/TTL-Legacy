@@ -271,11 +271,6 @@ impl TtlVaultContract {
         let key = DataKey::TokenWhitelist(token_address);
         env.storage().persistent().get(&key).unwrap_or(false)
     }
-    /// # Returns
-    /// `Some(seconds)` with the maximum interval, or `None` if not set
-    pub fn get_max_check_in_interval(env: Env) -> Option<u64> {
-        env.storage().instance().get(&DataKey::MaxCheckInInterval)
-    }
 
     /// Admin-only. Upgrades the contract to a new WASM hash.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
@@ -408,6 +403,9 @@ impl TtlVaultContract {
                 beneficiaries: Vec::new(&env),
                 metadata,
                 token_address: vault_token,
+                name: String::from_str(&env, ""),
+                description: String::from_str(&env, ""),
+                notes: String::from_str(&env, ""),
             };
             Self::save_vault(&env, vault_id, &vault);
             Self::add_owner_vault_id(&env, &owner, vault_id, check_in_interval);
@@ -1013,6 +1011,124 @@ impl TtlVaultContract {
             env.events().publish((SET_BENEFICIARIES_TOPIC, vault_id), beneficiaries);
             Ok(())
         }
+
+    /// Adds a single beneficiary to a vault's multi-beneficiary split.
+    ///
+    /// This function adds a new beneficiary with the specified BPS allocation.
+    /// The total BPS across all beneficiaries must not exceed 10,000 (100%).
+    /// If adding this beneficiary would exceed 10,000 BPS, the operation fails.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The address of the caller (must be the vault owner)
+    /// * `address` - The beneficiary address to add
+    /// * `percentage` - The BPS allocation (0-10000)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    /// * `ContractError::InvalidBps` - If total BPS would exceed 10,000
+    /// * `ContractError::InvalidBeneficiary` - If address is the vault owner
+    pub fn add_beneficiary(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        address: Address,
+        percentage: u32,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        if address == vault.owner {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+        
+        // Check if beneficiary already exists
+        for entry in vault.beneficiaries.iter() {
+            if entry.address == address {
+                return Err(ContractError::InvalidBeneficiary);
+            }
+        }
+        
+        // Calculate total BPS after adding new beneficiary
+        let current_total: u32 = vault.beneficiaries.iter().map(|e| e.bps).sum();
+        if current_total + percentage > 10_000 {
+            return Err(ContractError::InvalidBps);
+        }
+        
+        vault.beneficiaries.push_back(BeneficiaryEntry {
+            address: address.clone(),
+            bps: percentage,
+        });
+        
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((BENEFICIARY_UPDATED_TOPIC, vault_id), (address, percentage));
+        Ok(())
+    }
+
+    /// Removes a beneficiary from a vault's multi-beneficiary split.
+    ///
+    /// This function removes an existing beneficiary from the vault's beneficiaries list.
+    /// If the beneficiary is not found, the operation fails.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The address of the caller (must be the vault owner)
+    /// * `address` - The beneficiary address to remove
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    /// * `ContractError::InvalidBeneficiary` - If beneficiary is not found
+    pub fn remove_beneficiary(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        address: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        
+        let mut found = false;
+        let mut new_beneficiaries = Vec::new(&env);
+        for entry in vault.beneficiaries.iter() {
+            if entry.address != address {
+                new_beneficiaries.push_back(entry);
+            } else {
+                found = true;
+            }
+        }
+        
+        if !found {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+        
+        vault.beneficiaries = new_beneficiaries;
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((BENEFICIARY_UPDATED_TOPIC, vault_id), address);
+        Ok(())
+    }
 
     // --- Task 4: update_metadata ---
 
