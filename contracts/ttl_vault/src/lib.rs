@@ -469,6 +469,7 @@ impl TtlVaultContract {
         Self::save_vault(&env, vault_id, &vault);
         let owner_ids = Self::load_owner_vault_ids(&env, &vault.owner);
         Self::save_owner_vault_ids(&env, &vault.owner, &owner_ids, vault.check_in_interval);
+        Self::log_audit_entry(&env, vault_id, "check_in", &caller, "");
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish((CHECK_IN_TOPIC, vault_id), vault.last_check_in);
         Ok(())
@@ -513,6 +514,7 @@ impl TtlVaultContract {
             .checked_add(amount)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::BalanceOverflow));
         Self::save_vault(&env, vault_id, &vault);
+        Self::log_audit_entry(&env, vault_id, "deposit", &from, "");
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish(
             (DEPOSIT_TOPIC, vault_id),
@@ -633,6 +635,7 @@ impl TtlVaultContract {
             token_client.transfer(&env.current_contract_address(), &vault.owner, &amount);
             vault.balance -= amount;
             Self::save_vault(&env, vault_id, &vault);
+            Self::log_audit_entry(&env, vault_id, "withdraw", &caller, "");
             env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
             env.events().publish(
                 (WITHDRAW_TOPIC, vault_id),
@@ -1048,6 +1051,7 @@ impl TtlVaultContract {
             }
             vault.metadata = metadata.clone();
             Self::save_vault(&env, vault_id, &vault);
+            Self::log_audit_entry(&env, vault_id, "update_metadata", &caller, "");
             env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
             env.events().publish((UPDATE_METADATA_TOPIC, vault_id), metadata);
             Ok(())
@@ -1546,6 +1550,7 @@ impl TtlVaultContract {
             Self::remove_beneficiary_vault_id(&env, &old_beneficiary, vault_id, vault.check_in_interval);
             Self::add_beneficiary_vault_id(&env, &new_beneficiary, vault_id, vault.check_in_interval);
         }
+        Self::log_audit_entry(&env, vault_id, "update_beneficiary", &caller, "");
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish((BENEFICIARY_UPDATED_TOPIC, vault_id), (old_beneficiary, new_beneficiary));
         Ok(())
@@ -1599,6 +1604,7 @@ impl TtlVaultContract {
             VAULT_TTL_THRESHOLD,
             new_ttl,
         );
+        Self::log_audit_entry(&env, vault_id, "update_check_in_interval", &vault.owner, "");
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish((UPDATE_INTERVAL_TOPIC, vault_id), (old_interval, new_interval));
         Ok(())
@@ -1643,6 +1649,7 @@ impl TtlVaultContract {
         Self::save_vault(&env, vault_id, &vault);
         Self::remove_owner_vault_id(&env, &vault.owner, vault_id, vault.check_in_interval);
         Self::remove_beneficiary_vault_id(&env, &vault.beneficiary, vault_id, vault.check_in_interval);
+        Self::log_audit_entry(&env, vault_id, "cancel_vault", &caller, "");
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish((CANCEL_TOPIC, vault_id), (vault.owner, refund_amount));
         Ok(())
@@ -1697,6 +1704,7 @@ impl TtlVaultContract {
             }
             vault.owner = new_owner.clone();
             Self::save_vault(&env, vault_id, &vault);
+            Self::log_audit_entry(&env, vault_id, "transfer_ownership", &caller, "");
             env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
             env.events().publish((OWNERSHIP_TOPIC, vault_id), (old_owner, new_owner));
             Ok(())
