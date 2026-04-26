@@ -22,11 +22,11 @@ pub const PAUSE_VAULT_TOPIC: Symbol = symbol_short!("v_pause");
 pub const RESUME_VAULT_TOPIC: Symbol = symbol_short!("v_resume");
 pub const SET_METADATA_TOPIC: Symbol = symbol_short!("set_meta");
 pub const INHERITANCE_TOPIC: Symbol = symbol_short!("inherit");
-pub const PASSKEY_USAGE_TOPIC: Symbol = symbol_short!("pk_usage");
-pub const BENEFICIARY_ASSIGNED_TOPIC: Symbol = symbol_short!("ben_asgn");
-pub const BENEFICIARY_ACCEPTED_TOPIC: Symbol = symbol_short!("ben_acpt");
-pub const BENEFICIARY_DECLINED_TOPIC: Symbol = symbol_short!("ben_decl");
-pub const PASSKEY_EXPIRY_EXTENDED_TOPIC: Symbol = symbol_short!("pk_ext");
+pub const ADD_PASSKEY_TOPIC: Symbol = symbol_short!("add_pk");
+pub const REMOVE_PASSKEY_TOPIC: Symbol = symbol_short!("rm_pk");
+pub const ROTATE_PASSKEY_TOPIC: Symbol = symbol_short!("rot_pk");
+pub const BACKUP_CODE_USED_TOPIC: Symbol = symbol_short!("bk_used");
+pub const BACKUP_CODES_GENERATED_TOPIC: Symbol = symbol_short!("bk_gen");
 
 /// Warning threshold in seconds. If TTL remaining < this value, ping_expiry emits an event.
 pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
@@ -67,9 +67,8 @@ pub enum DataKey {
     TokenWhitelist(Address),
     VaultMetadata(u64),
     ParentVault(u64),
-    PasskeyUsage(u64),
-    BeneficiaryStatus(u64),
-    PasskeyExpiry(u64, BytesN<32>),
+    VaultPasskeys(u64),
+    BackupCodes(u64),
 }
 
 /// A vesting schedule attached to a vault.
@@ -133,6 +132,22 @@ pub struct BridgeConfig {
     pub is_active: bool,
 }
 
+/// Passkey hash for multi-passkey support - Issue #394
+#[contracttype]
+#[derive(Clone)]
+pub struct PasskeyHash {
+    pub hash: BytesN<32>,
+    pub added_at: u64,
+}
+
+/// Backup code entry - Issue #393
+#[contracttype]
+#[derive(Clone)]
+pub struct BackupCode {
+    pub code: String,
+    pub used: bool,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct Vault {
@@ -159,6 +174,8 @@ pub struct Vault {
     pub release_condition: ReleaseCondition,
     /// Parent vault ID for inheritance chain - Issue #381
     pub parent_vault_id: Option<u64>,
+    /// Primary passkey hash for backwards compatibility - Issue #392, #394
+    pub passkey_hash: Option<BytesN<32>>,
 }
 
 /// Passkey usage entry for tracking check-ins - Issue #395
