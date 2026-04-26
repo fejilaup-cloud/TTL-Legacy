@@ -13,7 +13,7 @@ use types::{
     RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MAX_INTERVAL_TOPIC, SET_MIN_INTERVAL_TOPIC,
     SET_VESTING_TOPIC, UNPAUSE_TOPIC, UPDATE_INTERVAL_TOPIC, UPDATE_METADATA_TOPIC,
     VAULT_CREATED_TOPIC, WITHDRAW_TOPIC, MAX_METADATA_LEN, MAX_NAME_LEN, MAX_DESCRIPTION_LEN,
-    MAX_NOTES_LEN,
+    MAX_NOTES_LEN, TTL_DECAY_TOPIC, SYNC_TTL_TOPIC, SET_MAX_TTL_TOPIC, SET_DECAY_RATE_TOPIC,
 };
 
 #[cfg(test)]
@@ -80,6 +80,7 @@ pub enum ContractError {
     VestingNotFound = 22,
     NothingToClaimYet = 23,
     VestingAlreadyComplete = 24,
+    MaxTtlExceeded = 25,
 }
 
 #[contract]
@@ -223,6 +224,73 @@ impl TtlVaultContract {
     /// `Some(seconds)` with the maximum interval, or `None` if not set
     pub fn get_max_check_in_interval(env: Env) -> Option<u64> {
         env.storage().instance().get(&DataKey::MaxCheckInInterval)
+    }
+
+    /// Sets the maximum TTL (time-to-live) for vaults in seconds.
+    ///
+    /// This prevents vaults from becoming permanent by capping the maximum
+    /// TTL that can be set during check-in. Default is 10 years (315,360,000 seconds).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `max_ttl` - Maximum TTL in seconds (must be > 0)
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the admin
+    /// * Panics if `max_ttl` is 0
+    pub fn set_max_ttl_seconds(env: Env, max_ttl: u64) {
+        Self::require_admin(&env);
+        if max_ttl == 0 {
+            panic_with_error!(&env, ContractError::InvalidInterval);
+        }
+        env.storage().instance().set(&DataKey::MaxTtlSeconds, &max_ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((SET_MAX_TTL_TOPIC,), max_ttl);
+    }
+
+    /// Returns the maximum TTL in seconds.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    ///
+    /// # Returns
+    /// The maximum TTL in seconds, or 10 years if not set
+    pub fn get_max_ttl_seconds(env: Env) -> u64 {
+        // Default: 10 years in seconds
+        env.storage().instance().get(&DataKey::MaxTtlSeconds).unwrap_or(315_360_000)
+    }
+
+    /// Sets the TTL decay rate as a percentage per month.
+    ///
+    /// If check-ins become infrequent (no check-in for 30 days), the TTL is reduced
+    /// by this rate. For example, 100 = 1% per month.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `decay_rate` - Decay rate in basis points (1-10000, where 100 = 1%)
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the admin
+    /// * Panics if `decay_rate` is 0 or > 10000
+    pub fn set_ttl_decay_rate(env: Env, decay_rate: u32) {
+        Self::require_admin(&env);
+        if decay_rate == 0 || decay_rate > 10_000 {
+            panic_with_error!(&env, ContractError::InvalidBps);
+        }
+        env.storage().instance().set(&DataKey::TtlDecayRate, &decay_rate);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((SET_DECAY_RATE_TOPIC,), decay_rate);
+    }
+
+    /// Returns the TTL decay rate in basis points.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    ///
+    /// # Returns
+    /// The decay rate in basis points (0 if not set, meaning no decay)
+    pub fn get_ttl_decay_rate(env: Env) -> u32 {
+        env.storage().instance().get(&DataKey::TtlDecayRate).unwrap_or(0)
     }
 
     /// Adds a token to the whitelist, allowing it to be used in vaults.
@@ -462,7 +530,17 @@ impl TtlVaultContract {
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
         }
-        vault.last_check_in = env.ledger().timestamp();
+        let now = env.ledger().timestamp();
+        vault.last_check_in = now;
+        
+        // Cap TTL at max_ttl_seconds
+        let max_ttl = Self::get_max_ttl_seconds(env.clone());
+        let deadline = now + vault.check_in_interval;
+        let max_deadline = now + max_ttl;
+        if deadline > max_deadline {
+            return Err(ContractError::MaxTtlExceeded);
+        }
+        
         Self::save_vault(&env, vault_id, &vault);
         let owner_ids = Self::load_owner_vault_ids(&env, &vault.owner);
         Self::save_owner_vault_ids(&env, &vault.owner, &owner_ids, vault.check_in_interval);

@@ -18,6 +18,10 @@ pub const PAUSE_TOPIC: Symbol = symbol_short!("pause");
 pub const UNPAUSE_TOPIC: Symbol = symbol_short!("unpause");
 pub const SET_VESTING_TOPIC: Symbol = symbol_short!("set_vest");
 pub const CLAIM_VEST_TOPIC: Symbol = symbol_short!("clm_vest");
+pub const TTL_DECAY_TOPIC: Symbol = symbol_short!("ttl_decay");
+pub const SYNC_TTL_TOPIC: Symbol = symbol_short!("sync_ttl");
+pub const SET_MAX_TTL_TOPIC: Symbol = symbol_short!("set_max_ttl");
+pub const SET_DECAY_RATE_TOPIC: Symbol = symbol_short!("set_decay");
 
 /// Warning threshold in seconds. If TTL remaining < this value, ping_expiry emits an event.
 pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
@@ -50,6 +54,8 @@ pub enum DataKey {
     Version,
     VestingSchedule(u64),
     TokenWhitelist(Address),
+    MaxTtlSeconds,
+    TtlDecayRate,
 }
 
 /// A vesting schedule attached to a vault.
