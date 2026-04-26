@@ -7,7 +7,7 @@ use soroban_sdk::{
 
 mod types;
 use types::{
-    BeneficiaryEntry, DataKey, ReleaseEvent, ReleaseStatus, Vault, VestingSchedule,
+    BeneficiaryEntry, BridgeConfig, DataKey, ReleaseEvent, ReleaseStatus, Vault, VestingSchedule,
     EXPIRY_WARNING_THRESHOLD, BENEFICIARY_UPDATED_TOPIC, CANCEL_TOPIC, CHECK_IN_TOPIC,
     CLAIM_VEST_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC, PAUSE_TOPIC, PING_EXPIRY_TOPIC,
     RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MAX_INTERVAL_TOPIC, SET_MIN_INTERVAL_TOPIC,
@@ -270,6 +270,80 @@ impl TtlVaultContract {
         
         let key = DataKey::TokenWhitelist(token_address);
         env.storage().persistent().get(&key).unwrap_or(false)
+    }
+
+    // --- Cross-Chain Bridge Support (Issue #366) ---
+
+    /// Registers a bridge for cross-chain support.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `chain_id` - The target chain ID
+    /// * `bridge_address` - The bridge contract address
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the admin
+    pub fn register_bridge(env: Env, chain_id: u32, bridge_address: Address) {
+        Self::require_admin(&env);
+        let config = BridgeConfig {
+            chain_id,
+            bridge_address: bridge_address.clone(),
+            is_active: true,
+        };
+        let key = DataKey::BridgeConfig(chain_id);
+        env.storage().persistent().set(&key, &config);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((symbol_short!("br_reg"),), (chain_id, bridge_address));
+    }
+
+    /// Deactivates a bridge.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `chain_id` - The chain ID to deactivate
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the admin
+    pub fn deactivate_bridge(env: Env, chain_id: u32) {
+        Self::require_admin(&env);
+        let key = DataKey::BridgeConfig(chain_id);
+        if let Some(mut config) = env.storage().persistent().get::<DataKey, BridgeConfig>(&key) {
+            config.is_active = false;
+            env.storage().persistent().set(&key, &config);
+            env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        }
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((symbol_short!("br_deact"),), chain_id);
+    }
+
+    /// Gets the bridge configuration for a chain.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `chain_id` - The chain ID
+    ///
+    /// # Returns
+    /// The bridge configuration if it exists
+    pub fn get_bridge_config(env: Env, chain_id: u32) -> Option<BridgeConfig> {
+        let key = DataKey::BridgeConfig(chain_id);
+        env.storage().persistent().get(&key)
+    }
+
+    /// Checks if a bridge is active.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `chain_id` - The chain ID
+    ///
+    /// # Returns
+    /// `true` if the bridge is active, `false` otherwise
+    pub fn is_bridge_active(env: Env, chain_id: u32) -> bool {
+        if let Some(config) = Self::get_bridge_config(env, chain_id) {
+            config.is_active
+        } else {
+            false
+        }
     }
 
     /// Admin-only. Upgrades the contract to a new WASM hash.

@@ -18,6 +18,8 @@ pub const PAUSE_TOPIC: Symbol = symbol_short!("pause");
 pub const UNPAUSE_TOPIC: Symbol = symbol_short!("unpause");
 pub const SET_VESTING_TOPIC: Symbol = symbol_short!("set_vest");
 pub const CLAIM_VEST_TOPIC: Symbol = symbol_short!("clm_vest");
+pub const BRIDGE_DEPOSIT_TOPIC: Symbol = symbol_short!("br_dep");
+pub const BRIDGE_RELEASE_TOPIC: Symbol = symbol_short!("br_rel");
 
 /// Warning threshold in seconds. If TTL remaining < this value, ping_expiry emits an event.
 pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
@@ -50,6 +52,8 @@ pub enum DataKey {
     Version,
     VestingSchedule(u64),
     TokenWhitelist(Address),
+    BridgeConfig(u32),
+    AssetMapping(u32, Address, u32),
 }
 
 /// A vesting schedule attached to a vault.
@@ -94,6 +98,15 @@ pub struct ReleaseEvent {
 pub struct BeneficiaryEntry {
     pub address: Address,
     pub bps: u32,
+}
+
+/// Bridge configuration for cross-chain support.
+#[contracttype]
+#[derive(Clone)]
+pub struct BridgeConfig {
+    pub chain_id: u32,
+    pub bridge_address: Address,
+    pub is_active: bool,
 }
 
 #[contracttype]
