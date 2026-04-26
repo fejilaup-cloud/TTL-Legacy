@@ -225,6 +225,58 @@ impl TtlVaultContract {
         env.storage().instance().get(&DataKey::MaxCheckInInterval)
     }
 
+    /// Adds a token to the whitelist, allowing it to be used in vaults.
+    ///
+    /// # Arguments
+    /// * `token_address` - The token contract address to whitelist
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the admin
+    pub fn whitelist_token(env: Env, token_address: Address) {
+        Self::require_admin(&env);
+        let key = DataKey::TokenWhitelist(token_address.clone());
+        env.storage().persistent().set(&key, &true);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+    }
+
+    /// Removes a token from the whitelist.
+    ///
+    /// # Arguments
+    /// * `token_address` - The token contract address to remove
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the admin
+    pub fn remove_token_whitelist(env: Env, token_address: Address) {
+        Self::require_admin(&env);
+        let key = DataKey::TokenWhitelist(token_address);
+        env.storage().persistent().remove(&key);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+    }
+
+    /// Checks if a token is whitelisted.
+    ///
+    /// # Arguments
+    /// * `token_address` - The token contract address to check
+    ///
+    /// # Returns
+    /// `true` if the token is whitelisted or is the default XLM token, `false` otherwise
+    pub fn is_token_whitelisted(env: Env, token_address: Address) -> bool {
+        // Default XLM token is always whitelisted
+        let default_token = Self::load_token(&env);
+        if token_address == default_token {
+            return true;
+        }
+        
+        let key = DataKey::TokenWhitelist(token_address);
+        env.storage().persistent().get(&key).unwrap_or(false)
+    }
+    /// # Returns
+    /// `Some(seconds)` with the maximum interval, or `None` if not set
+    pub fn get_max_check_in_interval(env: Env) -> Option<u64> {
+        env.storage().instance().get(&DataKey::MaxCheckInInterval)
+    }
+
     /// Admin-only. Upgrades the contract to a new WASM hash.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         Self::require_admin(&env);
@@ -317,6 +369,7 @@ impl TtlVaultContract {
             owner: Address,
             beneficiary: Address,
             check_in_interval: u64,
+            token_address: Option<Address>,
         ) -> u64 {
             owner.require_auth();
             Self::require_initialized(&env);
@@ -329,6 +382,16 @@ impl TtlVaultContract {
             if owner == beneficiary {
                 panic_with_error!(&env, ContractError::InvalidBeneficiary);
             }
+
+            // Use provided token or default to contract's XLM token
+            let vault_token = match token_address {
+                Some(addr) => {
+                    // Validate token is whitelisted
+                    Self::assert_token_whitelisted(&env, &addr);
+                    addr
+                }
+                None => Self::load_token(&env),
+            };
 
             let vault_id = Self::vault_count(env.clone()) + 1;
             let timestamp = env.ledger().timestamp();
@@ -344,9 +407,7 @@ impl TtlVaultContract {
                 status: ReleaseStatus::Locked,
                 beneficiaries: Vec::new(&env),
                 metadata,
-                name: String::from_str(&env, ""),
-                description: String::from_str(&env, ""),
-                notes: String::from_str(&env, ""),
+                token_address: vault_token,
             };
             Self::save_vault(&env, vault_id, &vault);
             Self::add_owner_vault_id(&env, &owner, vault_id, check_in_interval);
@@ -442,8 +503,9 @@ impl TtlVaultContract {
             panic_with_error!(&env, ContractError::VaultExpired);
         }
 
-        let xlm = token::Client::new(&env, &Self::load_token(&env));
-        xlm.transfer(&from, &env.current_contract_address(), &amount);
+        // Use vault's token instead of default XLM
+        let token_client = token::Client::new(&env, &vault.token_address);
+        token_client.transfer(&from, &env.current_contract_address(), &amount);
         vault.balance = vault.balance
             .checked_add(amount)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::BalanceOverflow));
@@ -505,11 +567,18 @@ impl TtlVaultContract {
             return;
         }
 
-        let xlm = token::Client::new(&env, &Self::load_token(&env));
-        xlm.transfer(&from, &env.current_contract_address(), &total_amount);
+        // Note: batch_deposit now requires all vaults to use the same token (default XLM)
+        // For multi-token support, use individual deposit calls
+        let default_token = Self::load_token(&env);
+        let token_client = token::Client::new(&env, &default_token);
+        token_client.transfer(&from, &env.current_contract_address(), &total_amount);
 
         for validated_deposit in validated.iter() {
             let (vault_id, mut vault, amount) = validated_deposit;
+            // Verify vault uses default token
+            if vault.token_address != default_token {
+                panic_with_error!(&env, ContractError::InvalidAmount);
+            }
             vault.balance = vault.balance
                 .checked_add(amount)
                 .unwrap_or_else(|| panic_with_error!(&env, ContractError::BalanceOverflow));
@@ -557,8 +626,8 @@ impl TtlVaultContract {
             if vault.balance < amount {
                 return Err(ContractError::InsufficientBalance);
             }
-            let xlm = token::Client::new(&env, &Self::load_token(&env));
-            xlm.transfer(&env.current_contract_address(), &vault.owner, &amount);
+            let token_client = token::Client::new(&env, &vault.token_address);
+            token_client.transfer(&env.current_contract_address(), &vault.owner, &amount);
             vault.balance -= amount;
             Self::save_vault(&env, vault_id, &vault);
             env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
@@ -626,10 +695,15 @@ impl TtlVaultContract {
         }
 
         // All validations passed — apply withdrawals
-        let xlm = token::Client::new(&env, &Self::load_token(&env));
+        // Note: batch_withdraw requires all vaults to use the same token (default XLM)
+        let default_token = Self::load_token(&env);
+        let token_client = token::Client::new(&env, &default_token);
         for (vault_id, amount) in vault_ids.iter().zip(amounts.iter()) {
             let mut vault = Self::load_vault(&env, vault_id);
-            xlm.transfer(&env.current_contract_address(), &vault.owner, &amount);
+            if vault.token_address != default_token {
+                return Err(ContractError::InvalidAmount);
+            }
+            token_client.transfer(&env.current_contract_address(), &vault.owner, &amount);
             vault.balance -= amount;
             let remaining = vault.balance;
             Self::save_vault(&env, vault_id, &vault);
@@ -744,10 +818,10 @@ impl TtlVaultContract {
             );
         } else {
             // No vesting: immediate full release
-            let xlm = token::Client::new(&env, &Self::load_token(&env));
+            let token_client = token::Client::new(&env, &vault.token_address);
 
             if vault.beneficiaries.is_empty() {
-                xlm.transfer(&env.current_contract_address(), &vault.beneficiary, &total);
+                token_client.transfer(&env.current_contract_address(), &vault.beneficiary, &total);
                 env.events().publish(
                     (RELEASE_TOPIC,),
                     ReleaseEvent { vault_id, beneficiary: vault.beneficiary.clone(), amount: total },
@@ -762,7 +836,7 @@ impl TtlVaultContract {
                         total * (entry.bps as i128) / 10_000
                     };
                     if share > 0 {
-                        xlm.transfer(&env.current_contract_address(), &entry.address, &share);
+                        token_client.transfer(&env.current_contract_address(), &entry.address, &share);
                     }
                     distributed += share;
                     env.events().publish(
@@ -852,11 +926,11 @@ impl TtlVaultContract {
         if vault.balance < amount {
             return Err(ContractError::InsufficientBalance);
         }
-        let xlm = token::Client::new(&env, &Self::load_token(&env));
+        let token_client = token::Client::new(&env, &vault.token_address);
 
         if vault.beneficiaries.is_empty() {
             // Single-beneficiary path: send full amount to primary beneficiary.
-            xlm.transfer(&env.current_contract_address(), &vault.beneficiary, &amount);
+            token_client.transfer(&env.current_contract_address(), &vault.beneficiary, &amount);
             env.events().publish(
                 (symbol_short!("partial"), vault_id),
                 (vault.beneficiary.clone(), amount),
@@ -872,7 +946,7 @@ impl TtlVaultContract {
                     amount * (entry.bps as i128) / 10_000
                 };
                 if share > 0 {
-                    xlm.transfer(&env.current_contract_address(), &entry.address, &share);
+                    token_client.transfer(&env.current_contract_address(), &entry.address, &share);
                 }
                 distributed += share;
                 env.events().publish(
@@ -1178,10 +1252,10 @@ impl TtlVaultContract {
             return Err(ContractError::InsufficientBalance);
         }
 
-        let xlm = token::Client::new(&env, &Self::load_token(&env));
+        let token_client = token::Client::new(&env, &vault.token_address);
 
         if vault.beneficiaries.is_empty() {
-            xlm.transfer(&env.current_contract_address(), &vault.beneficiary, &amount);
+            token_client.transfer(&env.current_contract_address(), &vault.beneficiary, &amount);
             env.events().publish(
                 (CLAIM_VEST_TOPIC, vault_id),
                 (vault.beneficiary.clone(), amount, unlocked),
@@ -1196,7 +1270,7 @@ impl TtlVaultContract {
                     amount * (entry.bps as i128) / 10_000
                 };
                 if share > 0 {
-                    xlm.transfer(&env.current_contract_address(), &entry.address, &share);
+                    token_client.transfer(&env.current_contract_address(), &entry.address, &share);
                 }
                 distributed += share;
                 env.events().publish(
@@ -1526,8 +1600,8 @@ impl TtlVaultContract {
         }
         let refund_amount = vault.balance;
         if refund_amount > 0 {
-            let xlm = token::Client::new(&env, &Self::load_token(&env));
-            xlm.transfer(&env.current_contract_address(), &vault.owner, &refund_amount);
+            let token_client = token::Client::new(&env, &vault.token_address);
+            token_client.transfer(&env.current_contract_address(), &vault.owner, &refund_amount);
         }
         vault.balance = 0;
         vault.status = ReleaseStatus::Cancelled;
@@ -1766,6 +1840,19 @@ impl TtlVaultContract {
     fn assert_metadata_len(env: &Env, metadata: &String) {
         if metadata.len() > MAX_METADATA_LEN {
             panic_with_error!(env, ContractError::InvalidAmount);
+        }
+    }
+
+    fn assert_token_whitelisted(env: &Env, token_address: &Address) {
+        let default_token = Self::load_token(env);
+        if token_address == &default_token {
+            return;
+        }
+        
+        let key = DataKey::TokenWhitelist(token_address.clone());
+        let is_whitelisted: bool = env.storage().persistent().get(&key).unwrap_or(false);
+        if !is_whitelisted {
+            panic_with_error!(env, ContractError::NotOwner); // Reusing error code for simplicity
         }
     }
 }
