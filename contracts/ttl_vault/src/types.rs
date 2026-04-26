@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, symbol_short, Address, Bytes, String, Symbol, Vec};
+use soroban_sdk::{contracttype, symbol_short, Address, Bytes, BytesN, String, Symbol, Vec};
 
 pub const RELEASE_TOPIC: Symbol = symbol_short!("release");
 pub const VAULT_CREATED_TOPIC: Symbol = symbol_short!("v_created");
@@ -22,6 +22,11 @@ pub const PAUSE_VAULT_TOPIC: Symbol = symbol_short!("v_pause");
 pub const RESUME_VAULT_TOPIC: Symbol = symbol_short!("v_resume");
 pub const SET_METADATA_TOPIC: Symbol = symbol_short!("set_meta");
 pub const INHERITANCE_TOPIC: Symbol = symbol_short!("inherit");
+pub const PASSKEY_USAGE_TOPIC: Symbol = symbol_short!("pk_usage");
+pub const BENEFICIARY_ASSIGNED_TOPIC: Symbol = symbol_short!("ben_asgn");
+pub const BENEFICIARY_ACCEPTED_TOPIC: Symbol = symbol_short!("ben_acpt");
+pub const BENEFICIARY_DECLINED_TOPIC: Symbol = symbol_short!("ben_decl");
+pub const PASSKEY_EXPIRY_EXTENDED_TOPIC: Symbol = symbol_short!("pk_ext");
 
 /// Warning threshold in seconds. If TTL remaining < this value, ping_expiry emits an event.
 pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
@@ -62,6 +67,9 @@ pub enum DataKey {
     TokenWhitelist(Address),
     VaultMetadata(u64),
     ParentVault(u64),
+    PasskeyUsage(u64),
+    BeneficiaryStatus(u64),
+    PasskeyExpiry(u64, BytesN<32>),
 }
 
 /// A vesting schedule attached to a vault.
@@ -151,4 +159,21 @@ pub struct Vault {
     pub release_condition: ReleaseCondition,
     /// Parent vault ID for inheritance chain - Issue #381
     pub parent_vault_id: Option<u64>,
+}
+
+/// Passkey usage entry for tracking check-ins - Issue #395
+#[contracttype]
+#[derive(Clone)]
+pub struct PasskeyUsageEntry {
+    pub passkey_hash: BytesN<32>,
+    pub timestamp: u64,
+}
+
+/// Beneficiary status enum - Issue #397
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum BeneficiaryStatus {
+    Pending,
+    Accepted,
+    Declined,
 }
