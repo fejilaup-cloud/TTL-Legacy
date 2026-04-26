@@ -2,18 +2,19 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, panic_with_error, symbol_short, token, Address,
-    BytesN, Env, String, Vec,
+    BytesN, Bytes, Env, String, Vec,
 };
 
 mod types;
 use types::{
-    BeneficiaryEntry, DataKey, ReleaseEvent, ReleaseStatus, Vault, VestingSchedule,
+    BeneficiaryEntry, DataKey, ReleaseEvent, ReleaseStatus, ReleaseCondition, Vault, VestingSchedule,
     EXPIRY_WARNING_THRESHOLD, BENEFICIARY_UPDATED_TOPIC, CANCEL_TOPIC, CHECK_IN_TOPIC,
     CLAIM_VEST_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC, PAUSE_TOPIC, PING_EXPIRY_TOPIC,
     RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MAX_INTERVAL_TOPIC, SET_MIN_INTERVAL_TOPIC,
     SET_VESTING_TOPIC, UNPAUSE_TOPIC, UPDATE_INTERVAL_TOPIC, UPDATE_METADATA_TOPIC,
     VAULT_CREATED_TOPIC, WITHDRAW_TOPIC, MAX_METADATA_LEN, MAX_NAME_LEN, MAX_DESCRIPTION_LEN,
-    MAX_NOTES_LEN,
+    MAX_NOTES_LEN, MAX_CUSTOM_METADATA_LEN, PAUSE_VAULT_TOPIC, RESUME_VAULT_TOPIC, SET_METADATA_TOPIC,
+    INHERITANCE_TOPIC,
 };
 
 #[cfg(test)]
@@ -408,6 +409,10 @@ impl TtlVaultContract {
                 beneficiaries: Vec::new(&env),
                 metadata,
                 token_address: vault_token,
+                custom_metadata: Bytes::new(&env),
+                is_paused: false,
+                release_condition: ReleaseCondition::OnExpiry,
+                parent_vault_id: None,
             };
             Self::save_vault(&env, vault_id, &vault);
             Self::add_owner_vault_id(&env, &owner, vault_id, check_in_interval);
@@ -456,6 +461,9 @@ impl TtlVaultContract {
         }
         caller.require_auth();
         let mut vault = Self::load_vault(&env, vault_id);
+        if vault.is_paused {
+            return Err(ContractError::Paused);
+        }
         if caller != vault.owner {
             return Err(ContractError::NotOwner);
         }
@@ -494,6 +502,9 @@ impl TtlVaultContract {
         }
         from.require_auth();
         let mut vault = Self::load_vault(&env, vault_id);
+        if vault.is_paused {
+            panic_with_error!(&env, ContractError::Paused);
+        }
         if vault.status != ReleaseStatus::Locked {
             panic_with_error!(&env, ContractError::AlreadyReleased);
         }
@@ -617,6 +628,9 @@ impl TtlVaultContract {
             }
             caller.require_auth();
             let mut vault = Self::load_vault(&env, vault_id);
+            if vault.is_paused {
+                return Err(ContractError::Paused);
+            }
             if caller != vault.owner {
                 return Err(ContractError::NotOwner);
             }
@@ -750,6 +764,9 @@ impl TtlVaultContract {
         for vault_id in vault_ids.iter() {
             let vault = Self::try_load_vault(&env, vault_id)
                 .ok_or(ContractError::VaultNotFound)?;
+            if vault.is_paused {
+                return Err(ContractError::Paused);
+            }
             if caller != vault.owner {
                 return Err(ContractError::NotOwner);
             }
@@ -1698,6 +1715,293 @@ impl TtlVaultContract {
             env.events().publish((OWNERSHIP_TOPIC, vault_id), (old_owner, new_owner));
             Ok(())
         }
+
+    // --- Issue #378: Vault Metadata ---
+
+    /// Sets custom metadata for a vault (max 2KB).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The address of the caller (must be the vault owner)
+    /// * `metadata` - Custom metadata as bytes (max 2KB)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    /// * `ContractError::InvalidAmount` - If metadata exceeds 2KB
+    pub fn set_vault_metadata(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        metadata: Bytes,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        if metadata.len() > MAX_CUSTOM_METADATA_LEN {
+            return Err(ContractError::InvalidAmount);
+        }
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        vault.custom_metadata = metadata.clone();
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((SET_METADATA_TOPIC, vault_id), metadata);
+        Ok(())
+    }
+
+    /// Gets custom metadata for a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// The custom metadata bytes
+    pub fn get_vault_metadata(env: Env, vault_id: u64) -> Bytes {
+        let vault = Self::load_vault(&env, vault_id);
+        vault.custom_metadata
+    }
+
+    // --- Issue #380: Vault Pause/Freeze ---
+
+    /// Pauses a vault, preventing all operations until resumed.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The address of the caller (must be the vault owner)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn pause_vault(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        vault.is_paused = true;
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((PAUSE_VAULT_TOPIC, vault_id), true);
+        Ok(())
+    }
+
+    /// Resumes a paused vault, allowing operations to resume.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The address of the caller (must be the vault owner)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn resume_vault(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        vault.is_paused = false;
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((RESUME_VAULT_TOPIC, vault_id), false);
+        Ok(())
+    }
+
+    /// Checks if a vault is paused.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// `true` if the vault is paused, `false` otherwise
+    pub fn is_vault_paused(env: Env, vault_id: u64) -> bool {
+        if let Some(vault) = Self::try_load_vault(&env, vault_id) {
+            vault.is_paused
+        } else {
+            false
+        }
+    }
+
+    // --- Issue #379: Conditional Release Logic ---
+
+    /// Sets the release condition for a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The address of the caller (must be the vault owner)
+    /// * `condition` - The release condition
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn set_release_condition(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        condition: ReleaseCondition,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        vault.release_condition = condition;
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Gets the release condition for a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// The release condition
+    pub fn get_release_condition(env: Env, vault_id: u64) -> ReleaseCondition {
+        let vault = Self::load_vault(&env, vault_id);
+        vault.release_condition
+    }
+
+    // --- Issue #381: Vault Inheritance Chain ---
+
+    /// Creates a new vault from inherited funds (beneficiary-only).
+    ///
+    /// The beneficiary of a released vault can create a new vault with the inherited funds,
+    /// establishing an inheritance chain for multi-generational wealth transfer.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `parent_vault_id` - The ID of the parent vault (must be released)
+    /// * `caller` - The address of the caller (must be the beneficiary of parent vault)
+    /// * `new_beneficiary` - The beneficiary for the new vault
+    /// * `check_in_interval` - Check-in interval for the new vault
+    /// * `token_address` - Optional token address for the new vault
+    ///
+    /// # Returns
+    /// The ID of the newly created vault
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the beneficiary of parent vault
+    /// * `ContractError::NotExpired` - If parent vault is not released
+    /// * `ContractError::InvalidInterval` - If check_in_interval is invalid
+    pub fn create_vault_from_inheritance(
+        env: Env,
+        parent_vault_id: u64,
+        caller: Address,
+        new_beneficiary: Address,
+        check_in_interval: u64,
+        token_address: Option<Address>,
+    ) -> u64 {
+        caller.require_auth();
+        Self::require_initialized(&env);
+        
+        let parent_vault = Self::load_vault(&env, parent_vault_id);
+        if caller != parent_vault.beneficiary {
+            panic_with_error!(&env, ContractError::NotOwner);
+        }
+        if parent_vault.status != ReleaseStatus::Released {
+            panic_with_error!(&env, ContractError::NotExpired);
+        }
+        if check_in_interval == 0 {
+            panic_with_error!(&env, ContractError::InvalidInterval);
+        }
+        Self::assert_interval_in_bounds(&env, check_in_interval);
+        if caller == new_beneficiary {
+            panic_with_error!(&env, ContractError::InvalidBeneficiary);
+        }
+
+        let vault_token = match token_address {
+            Some(addr) => {
+                Self::assert_token_whitelisted(&env, &addr);
+                addr
+            }
+            None => Self::load_token(&env),
+        };
+
+        let vault_id = Self::vault_count(env.clone()) + 1;
+        let timestamp = env.ledger().timestamp();
+        let metadata = String::from_str(&env, "");
+        let new_vault = Vault {
+            owner: caller.clone(),
+            beneficiary: new_beneficiary.clone(),
+            balance: 0,
+            check_in_interval,
+            last_check_in: timestamp,
+            created_at: timestamp,
+            status: ReleaseStatus::Locked,
+            beneficiaries: Vec::new(&env),
+            metadata,
+            token_address: vault_token,
+            custom_metadata: Bytes::new(&env),
+            is_paused: false,
+            release_condition: ReleaseCondition::OnExpiry,
+            parent_vault_id: Some(parent_vault_id),
+        };
+        
+        Self::save_vault(&env, vault_id, &new_vault);
+        Self::add_owner_vault_id(&env, &caller, vault_id, check_in_interval);
+        Self::add_beneficiary_vault_id(&env, &new_beneficiary, vault_id, check_in_interval);
+        
+        let key = DataKey::VaultCount;
+        env.storage().persistent().set(&key, &vault_id);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        
+        env.events().publish(
+            (INHERITANCE_TOPIC,),
+            (parent_vault_id, vault_id, caller, new_beneficiary, check_in_interval),
+        );
+        vault_id
+    }
+
+    /// Gets the parent vault ID for an inherited vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// `Some(parent_vault_id)` if this is an inherited vault, `None` otherwise
+    pub fn get_parent_vault(env: Env, vault_id: u64) -> Option<u64> {
+        if let Some(vault) = Self::try_load_vault(&env, vault_id) {
+            vault.parent_vault_id
+        } else {
+            None
+        }
+    }
 
     // --- helpers ---
 
