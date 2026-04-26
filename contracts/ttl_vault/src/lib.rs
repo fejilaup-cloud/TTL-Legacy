@@ -81,6 +81,7 @@ pub enum ContractError {
     VestingNotFound = 22,
     NothingToClaimYet = 23,
     VestingAlreadyComplete = 24,
+    MaxTtlExceeded = 25,
 }
 
 #[contract]
@@ -224,6 +225,73 @@ impl TtlVaultContract {
     /// `Some(seconds)` with the maximum interval, or `None` if not set
     pub fn get_max_check_in_interval(env: Env) -> Option<u64> {
         env.storage().instance().get(&DataKey::MaxCheckInInterval)
+    }
+
+    /// Sets the maximum TTL (time-to-live) for vaults in seconds.
+    ///
+    /// This prevents vaults from becoming permanent by capping the maximum
+    /// TTL that can be set during check-in. Default is 10 years (315,360,000 seconds).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `max_ttl` - Maximum TTL in seconds (must be > 0)
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the admin
+    /// * Panics if `max_ttl` is 0
+    pub fn set_max_ttl_seconds(env: Env, max_ttl: u64) {
+        Self::require_admin(&env);
+        if max_ttl == 0 {
+            panic_with_error!(&env, ContractError::InvalidInterval);
+        }
+        env.storage().instance().set(&DataKey::MaxTtlSeconds, &max_ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((SET_MAX_TTL_TOPIC,), max_ttl);
+    }
+
+    /// Returns the maximum TTL in seconds.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    ///
+    /// # Returns
+    /// The maximum TTL in seconds, or 10 years if not set
+    pub fn get_max_ttl_seconds(env: Env) -> u64 {
+        // Default: 10 years in seconds
+        env.storage().instance().get(&DataKey::MaxTtlSeconds).unwrap_or(315_360_000)
+    }
+
+    /// Sets the TTL decay rate as a percentage per month.
+    ///
+    /// If check-ins become infrequent (no check-in for 30 days), the TTL is reduced
+    /// by this rate. For example, 100 = 1% per month.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `decay_rate` - Decay rate in basis points (1-10000, where 100 = 1%)
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the admin
+    /// * Panics if `decay_rate` is 0 or > 10000
+    pub fn set_ttl_decay_rate(env: Env, decay_rate: u32) {
+        Self::require_admin(&env);
+        if decay_rate == 0 || decay_rate > 10_000 {
+            panic_with_error!(&env, ContractError::InvalidBps);
+        }
+        env.storage().instance().set(&DataKey::TtlDecayRate, &decay_rate);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((SET_DECAY_RATE_TOPIC,), decay_rate);
+    }
+
+    /// Returns the TTL decay rate in basis points.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    ///
+    /// # Returns
+    /// The decay rate in basis points (0 if not set, meaning no decay)
+    pub fn get_ttl_decay_rate(env: Env) -> u32 {
+        env.storage().instance().get(&DataKey::TtlDecayRate).unwrap_or(0)
     }
 
     /// Adds a token to the whitelist, allowing it to be used in vaults.
@@ -470,7 +538,17 @@ impl TtlVaultContract {
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
         }
-        vault.last_check_in = env.ledger().timestamp();
+        let now = env.ledger().timestamp();
+        vault.last_check_in = now;
+        
+        // Cap TTL at max_ttl_seconds
+        let max_ttl = Self::get_max_ttl_seconds(env.clone());
+        let deadline = now + vault.check_in_interval;
+        let max_deadline = now + max_ttl;
+        if deadline > max_deadline {
+            return Err(ContractError::MaxTtlExceeded);
+        }
+        
         Self::save_vault(&env, vault_id, &vault);
         let owner_ids = Self::load_owner_vault_ids(&env, &vault.owner);
         Self::save_owner_vault_ids(&env, &vault.owner, &owner_ids, vault.check_in_interval);
@@ -868,6 +946,180 @@ impl TtlVaultContract {
             Self::save_vault(&env, vault_id, &vault);
             env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         }
+    }
+
+    /// Applies TTL decay to a vault if no check-in for 30 days.
+    ///
+    /// Anyone can call this function. If the vault hasn't been checked in for 30 days,
+    /// the TTL is reduced by the configured decay rate. This encourages regular engagement.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// `Ok(new_ttl_remaining)` with the remaining TTL after decay, or `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::VaultNotFound` - If vault does not exist
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn apply_ttl_decay(env: Env, vault_id: u64) -> Result<u64, ContractError> {
+        let mut vault = Self::try_load_vault(&env, vault_id)
+            .ok_or(ContractError::VaultNotFound)?;
+        
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        
+        let decay_rate = Self::get_ttl_decay_rate(env.clone());
+        if decay_rate == 0 {
+            // No decay configured
+            return Ok(Self::get_ttl_remaining(env, vault_id).unwrap_or(0));
+        }
+        
+        let now = env.ledger().timestamp();
+        let last_check_in = vault.last_check_in;
+        let thirty_days = 30 * 24 * 60 * 60; // 2,592,000 seconds
+        
+        // Only apply decay if no check-in for 30 days
+        if now < last_check_in + thirty_days {
+            return Ok(Self::get_ttl_remaining(env, vault_id).unwrap_or(0));
+        }
+        
+        // Calculate new TTL with decay applied
+        let current_deadline = last_check_in + vault.check_in_interval;
+        let remaining = if now >= current_deadline {
+            0u64
+        } else {
+            current_deadline - now
+        };
+        
+        // Apply decay: new_ttl = remaining * (1 - decay_rate / 10000)
+        let decayed_ttl = remaining * (10_000 - decay_rate as u64) / 10_000;
+        let new_deadline = now + decayed_ttl;
+        
+        // Update last_check_in to reflect the decay application
+        vault.last_check_in = new_deadline - vault.check_in_interval;
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((TTL_DECAY_TOPIC, vault_id), (remaining, decayed_ttl));
+        
+        Ok(decayed_ttl)
+    }
+
+    /// Synchronizes TTL across multiple vaults owned by the caller.
+    ///
+    /// Extends TTL for all specified vaults in a single transaction. This is more
+    /// efficient than calling `check_in` multiple times. All vaults must be owned
+    /// by the caller and in Locked status.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_ids` - Vector of vault IDs to synchronize
+    /// * `caller` - The address of the caller (must be the owner of all vaults)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::Paused` - If the contract is paused
+    /// * `ContractError::VaultNotFound` - If any vault does not exist
+    /// * `ContractError::NotOwner` - If caller is not the owner of any vault
+    /// * `ContractError::AlreadyReleased` - If any vault is not in Locked status
+    /// * `ContractError::MaxTtlExceeded` - If any vault would exceed max TTL
+    pub fn sync_vault_ttls(
+        env: Env,
+        vault_ids: Vec<u64>,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+        caller.require_auth();
+
+        // Validate all vaults before mutating state
+        for vault_id in vault_ids.iter() {
+            let vault = Self::try_load_vault(&env, vault_id)
+                .ok_or(ContractError::VaultNotFound)?;
+            if caller != vault.owner {
+                return Err(ContractError::NotOwner);
+            }
+            if vault.status != ReleaseStatus::Locked {
+                return Err(ContractError::AlreadyReleased);
+            }
+            
+            // Check max TTL constraint
+            let max_ttl = Self::get_max_ttl_seconds(env.clone());
+            let now = env.ledger().timestamp();
+            let deadline = now + vault.check_in_interval;
+            let max_deadline = now + max_ttl;
+            if deadline > max_deadline {
+                return Err(ContractError::MaxTtlExceeded);
+            }
+        }
+
+        // All validations passed — apply check-ins
+        let now = env.ledger().timestamp();
+        for vault_id in vault_ids.iter() {
+            let mut vault = Self::load_vault(&env, vault_id);
+            vault.last_check_in = now;
+            Self::save_vault(&env, vault_id, &vault);
+            env.events().publish((CHECK_IN_TOPIC, vault_id), now);
+        }
+        
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((SYNC_TTL_TOPIC,), vault_ids.len());
+        Ok(())
+    }
+
+    /// Forecasts the expected expiry time of a vault based on check-in frequency.
+    ///
+    /// Calculates when the vault will expire if check-ins continue at the specified
+    /// frequency. This helps owners plan ahead and ensure timely check-ins.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `check_in_frequency_days` - Expected check-in frequency in days
+    ///
+    /// # Returns
+    /// Unix timestamp of the expected expiry, or `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::VaultNotFound` - If vault does not exist
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn forecast_expiry(env: Env, vault_id: u64, check_in_frequency_days: u64) -> Result<u64, ContractError> {
+        let vault = Self::try_load_vault(&env, vault_id)
+            .ok_or(ContractError::VaultNotFound)?;
+        
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        
+        if check_in_frequency_days == 0 {
+            return Err(ContractError::InvalidInterval);
+        }
+        
+        let now = env.ledger().timestamp();
+        let check_in_frequency_seconds = check_in_frequency_days * 24 * 60 * 60;
+        
+        // Current deadline
+        let current_deadline = vault.last_check_in + vault.check_in_interval;
+        
+        // If already expired, return current time
+        if now >= current_deadline {
+            return Ok(now);
+        }
+        
+        // Calculate how many check-ins until expiry at the given frequency
+        let remaining_until_expiry = current_deadline - now;
+        let num_check_ins = (remaining_until_expiry + check_in_frequency_seconds - 1) / check_in_frequency_seconds;
+        
+        // Each check-in extends TTL by vault.check_in_interval
+        let total_extension = num_check_ins * vault.check_in_interval;
+        let forecasted_expiry = now + total_extension;
+        
+        Ok(forecasted_expiry)
     }
 
     // --- Task 1: ping_expiry ---
