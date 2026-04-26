@@ -7,14 +7,15 @@ use soroban_sdk::{
 
 mod types;
 use types::{
-    BeneficiaryEntry, DataKey, ReleaseEvent, ReleaseStatus, ReleaseCondition, Vault, VestingSchedule,
+    BeneficiaryEntry, BeneficiaryStatus, DataKey, PasskeyUsageEntry, ReleaseEvent, ReleaseStatus, ReleaseCondition, Vault, VestingSchedule,
     EXPIRY_WARNING_THRESHOLD, BENEFICIARY_UPDATED_TOPIC, CANCEL_TOPIC, CHECK_IN_TOPIC,
     CLAIM_VEST_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC, PAUSE_TOPIC, PING_EXPIRY_TOPIC,
     RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MAX_INTERVAL_TOPIC, SET_MIN_INTERVAL_TOPIC,
     SET_VESTING_TOPIC, UNPAUSE_TOPIC, UPDATE_INTERVAL_TOPIC, UPDATE_METADATA_TOPIC,
     VAULT_CREATED_TOPIC, WITHDRAW_TOPIC, MAX_METADATA_LEN, MAX_NAME_LEN, MAX_DESCRIPTION_LEN,
     MAX_NOTES_LEN, MAX_CUSTOM_METADATA_LEN, PAUSE_VAULT_TOPIC, RESUME_VAULT_TOPIC, SET_METADATA_TOPIC,
-    INHERITANCE_TOPIC,
+    INHERITANCE_TOPIC, PASSKEY_USAGE_TOPIC, BENEFICIARY_ASSIGNED_TOPIC, BENEFICIARY_ACCEPTED_TOPIC,
+    BENEFICIARY_DECLINED_TOPIC, PASSKEY_EXPIRY_EXTENDED_TOPIC,
 };
 
 #[cfg(test)]
@@ -568,6 +569,10 @@ impl TtlVaultContract {
             env.storage().persistent().set(&key, &vault_id);
             env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
             env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+            
+            // Emit beneficiary assigned event - Issue #398
+            env.events().publish((BENEFICIARY_ASSIGNED_TOPIC, vault_id), beneficiary.clone());
+            
             env.events().publish(
                 (VAULT_CREATED_TOPIC,),
                 (vault_id, owner, beneficiary, check_in_interval, timestamp),
@@ -592,7 +597,7 @@ impl TtlVaultContract {
     /// * `ContractError::Paused` - If the contract is paused
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
-    pub fn check_in(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
+    pub fn check_in(env: Env, vault_id: u64, caller: Address, passkey_hash: BytesN<32>) -> Result<(), ContractError> {
         if Self::load_paused(&env) {
             return Err(ContractError::Paused);
         }
@@ -607,7 +612,15 @@ impl TtlVaultContract {
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
         }
+        
+        // Check passkey expiry - Issue #396
         let now = env.ledger().timestamp();
+        if let Some(expiry) = Self::get_passkey_expiry(env.clone(), vault_id, passkey_hash.clone()) {
+            if now > expiry {
+                return Err(ContractError::InvalidAmount); // Reusing error for expired passkey
+            }
+        }
+        
         vault.last_check_in = now;
         
         // Cap TTL at max_ttl_seconds
@@ -621,6 +634,10 @@ impl TtlVaultContract {
         Self::save_vault(&env, vault_id, &vault);
         let owner_ids = Self::load_owner_vault_ids(&env, &vault.owner);
         Self::save_owner_vault_ids(&env, &vault.owner, &owner_ids, vault.check_in_interval);
+        
+        // Log passkey usage - Issue #395
+        Self::log_passkey_usage(&env, vault_id, &passkey_hash, now);
+        
         Self::log_audit_entry(&env, vault_id, "check_in", &caller, "");
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish((CHECK_IN_TOPIC, vault_id), vault.last_check_in);
@@ -966,6 +983,12 @@ impl TtlVaultContract {
         let total = vault.balance;
         if total == 0 {
             panic_with_error!(&env, ContractError::EmptyVault);
+        }
+
+        // Check beneficiary acceptance status - Issue #397
+        let beneficiary_status = Self::get_beneficiary_status(env.clone(), vault_id);
+        if beneficiary_status == BeneficiaryStatus::Declined {
+            panic_with_error!(&env, ContractError::InvalidBeneficiary);
         }
 
         // Check if a vesting schedule is attached
@@ -1963,6 +1986,129 @@ impl TtlVaultContract {
         Self::load_token(&env)
     }
 
+    /// Returns all vault IDs where the given address is a beneficiary - Issue #398
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `beneficiary` - The beneficiary address
+    ///
+    /// # Returns
+    /// A vector of vault IDs where the address is a beneficiary
+    pub fn get_vaults_as_beneficiary(env: Env, beneficiary: Address) -> Vec<u64> {
+        Self::load_beneficiary_vault_ids(&env, &beneficiary)
+    }
+
+    /// Returns passkey usage history for a vault - Issue #395
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault ID
+    ///
+    /// # Returns
+    /// A vector of PasskeyUsageEntry records
+    pub fn get_passkey_usage(env: Env, vault_id: u64) -> Vec<PasskeyUsageEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PasskeyUsage(vault_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Accepts the beneficiary role for a vault - Issue #397
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault ID
+    /// * `caller` - The beneficiary address (must authorize)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    pub fn accept_beneficiary_role(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.beneficiary {
+            return Err(ContractError::NotOwner);
+        }
+        env.storage().persistent().set(&DataKey::BeneficiaryStatus(vault_id), &BeneficiaryStatus::Accepted);
+        env.storage().persistent().extend_ttl(&DataKey::BeneficiaryStatus(vault_id), VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.events().publish((BENEFICIARY_ACCEPTED_TOPIC, vault_id), caller);
+        Ok(())
+    }
+
+    /// Declines the beneficiary role for a vault - Issue #397
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault ID
+    /// * `caller` - The beneficiary address (must authorize)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    pub fn decline_beneficiary_role(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.beneficiary {
+            return Err(ContractError::NotOwner);
+        }
+        env.storage().persistent().set(&DataKey::BeneficiaryStatus(vault_id), &BeneficiaryStatus::Declined);
+        env.storage().persistent().extend_ttl(&DataKey::BeneficiaryStatus(vault_id), VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.events().publish((BENEFICIARY_DECLINED_TOPIC, vault_id), caller);
+        Ok(())
+    }
+
+    /// Gets the beneficiary status for a vault - Issue #397
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault ID
+    ///
+    /// # Returns
+    /// The BeneficiaryStatus (defaults to Pending if not set)
+    pub fn get_beneficiary_status(env: Env, vault_id: u64) -> BeneficiaryStatus {
+        env.storage()
+            .persistent()
+            .get(&DataKey::BeneficiaryStatus(vault_id))
+            .unwrap_or(BeneficiaryStatus::Pending)
+    }
+
+    /// Extends passkey expiry - Issue #396
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault ID
+    /// * `caller` - The vault owner (must authorize)
+    /// * `passkey_hash` - The passkey hash to extend
+    /// * `new_expiry` - New expiry timestamp
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    pub fn extend_passkey_expiry(env: Env, vault_id: u64, caller: Address, passkey_hash: BytesN<32>, new_expiry: u64) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        env.storage().persistent().set(&DataKey::PasskeyExpiry(vault_id, passkey_hash.clone()), &new_expiry);
+        env.storage().persistent().extend_ttl(&DataKey::PasskeyExpiry(vault_id, passkey_hash.clone()), VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.events().publish((PASSKEY_EXPIRY_EXTENDED_TOPIC, vault_id), (passkey_hash, new_expiry));
+        Ok(())
+    }
+
+    /// Gets passkey expiry timestamp - Issue #396
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault ID
+    /// * `passkey_hash` - The passkey hash
+    ///
+    /// # Returns
+    /// The expiry timestamp, or None if not set
+    pub fn get_passkey_expiry(env: Env, vault_id: u64, passkey_hash: BytesN<32>) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PasskeyExpiry(vault_id, passkey_hash))
+    }
+
+
     /// Updates the primary beneficiary of a vault.
     ///
     /// This function allows the vault owner to change the beneficiary who will
@@ -2637,6 +2783,28 @@ impl TtlVaultContract {
         if !is_whitelisted {
             panic_with_error!(env, ContractError::NotOwner); // Reusing error code for simplicity
         }
+    }
+
+    // --- Issue #395: Passkey Usage Analytics ---
+
+    /// Logs a passkey usage entry for a vault check-in
+    fn log_passkey_usage(env: &Env, vault_id: u64, passkey_hash: &BytesN<32>, timestamp: u64) {
+        let mut usage: Vec<PasskeyUsageEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PasskeyUsage(vault_id))
+            .unwrap_or(Vec::new(env));
+        
+        usage.push_back(PasskeyUsageEntry {
+            passkey_hash: passkey_hash.clone(),
+            timestamp,
+        });
+        
+        let key = DataKey::PasskeyUsage(vault_id);
+        env.storage().persistent().set(&key, &usage);
+        let ttl = vault_ttl_ledgers(Self::load_vault(env, vault_id).check_in_interval);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.events().publish((PASSKEY_USAGE_TOPIC, vault_id), (passkey_hash.clone(), timestamp));
     }
 
     // --- Issue #383: Vault Recovery Mode ---
