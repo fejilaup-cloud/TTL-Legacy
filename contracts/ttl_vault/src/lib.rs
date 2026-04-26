@@ -1055,6 +1055,56 @@ impl TtlVaultContract {
         Ok(())
     }
 
+    /// Forecasts the expected expiry time of a vault based on check-in frequency.
+    ///
+    /// Calculates when the vault will expire if check-ins continue at the specified
+    /// frequency. This helps owners plan ahead and ensure timely check-ins.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `check_in_frequency_days` - Expected check-in frequency in days
+    ///
+    /// # Returns
+    /// Unix timestamp of the expected expiry, or `Err` on failure
+    ///
+    /// # Errors
+    /// * `ContractError::VaultNotFound` - If vault does not exist
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn forecast_expiry(env: Env, vault_id: u64, check_in_frequency_days: u64) -> Result<u64, ContractError> {
+        let vault = Self::try_load_vault(&env, vault_id)
+            .ok_or(ContractError::VaultNotFound)?;
+        
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        
+        if check_in_frequency_days == 0 {
+            return Err(ContractError::InvalidInterval);
+        }
+        
+        let now = env.ledger().timestamp();
+        let check_in_frequency_seconds = check_in_frequency_days * 24 * 60 * 60;
+        
+        // Current deadline
+        let current_deadline = vault.last_check_in + vault.check_in_interval;
+        
+        // If already expired, return current time
+        if now >= current_deadline {
+            return Ok(now);
+        }
+        
+        // Calculate how many check-ins until expiry at the given frequency
+        let remaining_until_expiry = current_deadline - now;
+        let num_check_ins = (remaining_until_expiry + check_in_frequency_seconds - 1) / check_in_frequency_seconds;
+        
+        // Each check-in extends TTL by vault.check_in_interval
+        let total_extension = num_check_ins * vault.check_in_interval;
+        let forecasted_expiry = now + total_extension;
+        
+        Ok(forecasted_expiry)
+    }
+
     // --- Task 1: ping_expiry ---
 
     /// Checks the remaining TTL and emits a warning event if near expiry.
