@@ -2910,3 +2910,52 @@ fn test_execute_scheduled_withdrawal_with_delegation() {
     let token_client = token::Client::new(&env, &token_address);
     assert_eq!(token_client.balance(&delegate), 200i128);
 }
+
+
+// ---- Issue #400: Conditional Acceptance Tests ----
+
+#[test]
+fn test_accept_with_conditions() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let conditions = String::from_str(&env, "Only if owner is deceased");
+    
+    // Beneficiary accepts with conditions
+    client.accept_with_conditions(&vault_id, &conditions);
+    
+    // Verify conditions stored
+    let stored = client.get_conditional_acceptance(&vault_id);
+    assert!(stored.is_some());
+    assert_eq!(stored.unwrap().approved_by_owner, false);
+}
+
+#[test]
+fn test_accept_with_conditions_beneficiary_only() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let conditions = String::from_str(&env, "Some conditions");
+    
+    // Non-beneficiary cannot accept with conditions
+    let result = client.try_accept_with_conditions(&vault_id, &conditions);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_approve_conditional_acceptance() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let conditions = String::from_str(&env, "Some conditions");
+    
+    client.accept_with_conditions(&vault_id, &conditions);
+    
+    // Owner approves
+    client.approve_conditional_acceptance(&vault_id);
+    
+    // Verify approval
+    let stored = client.get_conditional_acceptance(&vault_id);
+    assert!(stored.is_some());
+    assert_eq!(stored.unwrap().approved_by_owner, true);
+}
