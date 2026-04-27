@@ -2818,3 +2818,95 @@ fn test_delegate_to_self_fails() {
     let result = client.try_delegate_beneficiary_role(&vault_id, &beneficiary);
     assert!(result.is_err());
 }
+
+
+// ---- Issue #402: Withdrawal Scheduling Tests ----
+
+#[test]
+fn test_set_withdrawal_schedule() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &1000i128);
+    
+    let now = env.ledger().timestamp();
+    let schedule = vec![
+        &env,
+        (now + 100, 100i128),
+        (now + 200, 200i128),
+    ];
+    
+    // Owner sets schedule
+    client.set_withdrawal_schedule(&vault_id, &schedule);
+}
+
+#[test]
+fn test_set_withdrawal_schedule_owner_only() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let now = env.ledger().timestamp();
+    let schedule = vec![
+        &env,
+        (now + 100, 100i128),
+    ];
+    
+    // Non-owner cannot set schedule
+    let result = client.try_set_withdrawal_schedule(&vault_id, &schedule);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_execute_scheduled_withdrawal() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &1000i128);
+    
+    let now = env.ledger().timestamp();
+    let schedule = vec![
+        &env,
+        (now + 100, 200i128),
+    ];
+    
+    client.set_withdrawal_schedule(&vault_id, &schedule);
+    
+    // Advance time
+    env.ledger().with_mut(|l| l.timestamp = now + 150);
+    
+    // Execute withdrawal
+    client.execute_scheduled_withdrawal(&vault_id);
+    
+    // Verify funds transferred
+    let token_client = token::Client::new(&env, &token_address);
+    assert_eq!(token_client.balance(&beneficiary), 200i128);
+}
+
+#[test]
+fn test_execute_scheduled_withdrawal_with_delegation() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let delegate = Address::generate(&env);
+    
+    client.deposit(&vault_id, &owner, &1000i128);
+    client.delegate_beneficiary_role(&vault_id, &delegate);
+    
+    let now = env.ledger().timestamp();
+    let schedule = vec![
+        &env,
+        (now + 100, 200i128),
+    ];
+    
+    client.set_withdrawal_schedule(&vault_id, &schedule);
+    
+    // Advance time
+    env.ledger().with_mut(|l| l.timestamp = now + 150);
+    
+    // Execute withdrawal
+    client.execute_scheduled_withdrawal(&vault_id);
+    
+    // Verify funds transferred to delegate
+    let token_client = token::Client::new(&env, &token_address);
+    assert_eq!(token_client.balance(&delegate), 200i128);
+}
