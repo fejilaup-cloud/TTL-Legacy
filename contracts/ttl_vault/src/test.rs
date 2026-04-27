@@ -2777,3 +2777,44 @@ fn test_beneficiary_assigned_event_emitted() {
     
     assert!(has_beneficiary_event);
 }
+
+
+// ---- Issue #401: Beneficiary Delegation Tests ----
+
+#[test]
+fn test_delegate_beneficiary_role() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let delegate = Address::generate(&env);
+    
+    // Beneficiary delegates to another address
+    client.delegate_beneficiary_role(&vault_id, &delegate);
+    
+    // Verify delegation
+    let delegated = client.get_delegated_beneficiary(&vault_id);
+    assert_eq!(delegated, Some(delegate.clone()));
+}
+
+#[test]
+fn test_delegate_beneficiary_requires_auth() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let delegate = Address::generate(&env);
+    
+    // Non-beneficiary cannot delegate
+    let result = client.try_delegate_beneficiary_role(&vault_id, &delegate);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_delegate_to_self_fails() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    
+    // Cannot delegate to self
+    let result = client.try_delegate_beneficiary_role(&vault_id, &beneficiary);
+    assert!(result.is_err());
+}
