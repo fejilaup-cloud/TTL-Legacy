@@ -27,6 +27,12 @@ pub const REMOVE_PASSKEY_TOPIC: Symbol = symbol_short!("rm_pk");
 pub const ROTATE_PASSKEY_TOPIC: Symbol = symbol_short!("rot_pk");
 pub const BACKUP_CODE_USED_TOPIC: Symbol = symbol_short!("bk_used");
 pub const BACKUP_CODES_GENERATED_TOPIC: Symbol = symbol_short!("bk_gen");
+pub const DELEGATE_BENEFICIARY_TOPIC: Symbol = symbol_short!("del_ben");
+pub const DISPUTE_FILED_TOPIC: Symbol = symbol_short!("disp_fil");
+pub const DISPUTE_RESOLVED_TOPIC: Symbol = symbol_short!("disp_res");
+pub const WITHDRAWAL_SCHEDULED_TOPIC: Symbol = symbol_short!("wd_sch");
+pub const WITHDRAWAL_EXECUTED_TOPIC: Symbol = symbol_short!("wd_exec");
+pub const CONDITIONS_ACCEPTED_TOPIC: Symbol = symbol_short!("cond_acc");
 
 /// Warning threshold in seconds. If TTL remaining < this value, ping_expiry emits an event.
 pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
@@ -69,6 +75,10 @@ pub enum DataKey {
     ParentVault(u64),
     VaultPasskeys(u64),
     BackupCodes(u64),
+    BeneficiaryDelegate(u64),
+    WithdrawalSchedule(u64),
+    DisputeStatus(u64),
+    ConditionalAcceptance(u64),
 }
 
 /// A vesting schedule attached to a vault.
@@ -193,4 +203,29 @@ pub enum BeneficiaryStatus {
     Pending,
     Accepted,
     Declined,
+}
+
+/// Dispute status enum - Issue #399
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum DisputeStatus {
+    None,
+    Filed,
+    Resolved,
+}
+
+/// Withdrawal schedule entry - Issue #402
+#[contracttype]
+#[derive(Clone)]
+pub struct WithdrawalScheduleEntry {
+    pub timestamp: u64,
+    pub amount: i128,
+}
+
+/// Conditional acceptance entry - Issue #400
+#[contracttype]
+#[derive(Clone)]
+pub struct ConditionalAcceptanceEntry {
+    pub conditions: String,
+    pub approved_by_owner: bool,
 }

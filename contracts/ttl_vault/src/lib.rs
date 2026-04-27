@@ -8,7 +8,7 @@ use soroban_sdk::{
 mod types;
 use types::{
     BeneficiaryEntry, DataKey, ReleaseEvent, ReleaseStatus, ReleaseCondition, Vault, VestingSchedule,
-    PasskeyHash, BackupCode,
+    PasskeyHash, BackupCode, DisputeStatus, WithdrawalScheduleEntry, ConditionalAcceptanceEntry,
     EXPIRY_WARNING_THRESHOLD, BENEFICIARY_UPDATED_TOPIC, CANCEL_TOPIC, CHECK_IN_TOPIC,
     CLAIM_VEST_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC, PAUSE_TOPIC, PING_EXPIRY_TOPIC,
     RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MAX_INTERVAL_TOPIC, SET_MIN_INTERVAL_TOPIC,
@@ -16,7 +16,9 @@ use types::{
     VAULT_CREATED_TOPIC, WITHDRAW_TOPIC, MAX_METADATA_LEN, MAX_NAME_LEN, MAX_DESCRIPTION_LEN,
     MAX_NOTES_LEN, MAX_CUSTOM_METADATA_LEN, PAUSE_VAULT_TOPIC, RESUME_VAULT_TOPIC, SET_METADATA_TOPIC,
     INHERITANCE_TOPIC, ADD_PASSKEY_TOPIC, REMOVE_PASSKEY_TOPIC, ROTATE_PASSKEY_TOPIC,
-    BACKUP_CODE_USED_TOPIC, BACKUP_CODES_GENERATED_TOPIC,
+    BACKUP_CODE_USED_TOPIC, BACKUP_CODES_GENERATED_TOPIC, DELEGATE_BENEFICIARY_TOPIC,
+    DISPUTE_FILED_TOPIC, DISPUTE_RESOLVED_TOPIC, WITHDRAWAL_SCHEDULED_TOPIC, WITHDRAWAL_EXECUTED_TOPIC,
+    CONDITIONS_ACCEPTED_TOPIC,
 };
 
 #[cfg(test)]
@@ -88,6 +90,10 @@ pub enum ContractError {
     PasskeyNotFound = 27,
     InvalidBackupCode = 28,
     BackupCodeAlreadyUsed = 29,
+    NotBeneficiary = 30,
+    DisputeFiled = 31,
+    NoScheduledWithdrawals = 32,
+    ConditionsNotApproved = 33,
 }
 
 #[contract]
@@ -3348,5 +3354,278 @@ impl TtlVaultContract {
             }
         }
         false
+    }
+
+    // --- Issue #401: Beneficiary Delegation ---
+
+    /// Delegates beneficiary role to another address.
+    /// Only the current beneficiary can call this.
+    pub fn delegate_beneficiary_role(env: Env, vault_id: u64, delegate_address: Address) {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        vault.beneficiary.require_auth();
+
+        if delegate_address == vault.beneficiary {
+            panic_with_error!(&env, ContractError::InvalidBeneficiary);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::BeneficiaryDelegate(vault_id), &delegate_address);
+
+        env.events().publish(
+            (DELEGATE_BENEFICIARY_TOPIC,),
+            (vault_id, vault.beneficiary.clone(), delegate_address),
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::BeneficiaryDelegate(vault_id),
+            VAULT_TTL_THRESHOLD,
+            vault_ttl_ledgers(vault.check_in_interval),
+        );
+    }
+
+    /// Gets the delegated beneficiary for a vault, if any.
+    pub fn get_delegated_beneficiary(env: Env, vault_id: u64) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::BeneficiaryDelegate(vault_id))
+    }
+
+    // --- Issue #402: Withdrawal Scheduling ---
+
+    /// Sets a withdrawal schedule for the vault. Owner-only.
+    pub fn set_withdrawal_schedule(
+        env: Env,
+        vault_id: u64,
+        schedule: Vec<(u64, i128)>,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        vault.owner.require_auth();
+
+        let mut entries = Vec::new(&env);
+        for (timestamp, amount) in schedule.iter() {
+            if amount <= &0 {
+                return Err(ContractError::InvalidAmount);
+            }
+            entries.push_back(WithdrawalScheduleEntry {
+                timestamp,
+                amount,
+            });
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::WithdrawalSchedule(vault_id), &entries);
+
+        env.events().publish(
+            (WITHDRAWAL_SCHEDULED_TOPIC,),
+            (vault_id, entries.len()),
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::WithdrawalSchedule(vault_id),
+            VAULT_TTL_THRESHOLD,
+            vault_ttl_ledgers(vault.check_in_interval),
+        );
+        Ok(())
+    }
+
+    /// Executes a scheduled withdrawal if conditions are met. Anyone can call.
+    pub fn execute_scheduled_withdrawal(env: Env, vault_id: u64) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        let mut vault = Self::load_vault(&env, vault_id);
+
+        let key = DataKey::WithdrawalSchedule(vault_id);
+        let mut schedule = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Vec<WithdrawalScheduleEntry>>(&key)
+            .ok_or(ContractError::NoScheduledWithdrawals)?;
+
+        let now = env.ledger().timestamp();
+        let mut executed = false;
+
+        for i in 0..schedule.len() {
+            let entry = schedule.get(i).unwrap();
+            if entry.timestamp <= now && entry.amount > 0 {
+                if vault.balance < entry.amount {
+                    return Err(ContractError::InsufficientBalance);
+                }
+
+                let token_client = token::Client::new(&env, &vault.token_address);
+                let beneficiary = Self::get_delegated_beneficiary(env.clone(), vault_id)
+                    .unwrap_or(vault.beneficiary.clone());
+
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &beneficiary,
+                    &entry.amount,
+                );
+
+                vault.balance -= entry.amount;
+                schedule.set(
+                    i,
+                    WithdrawalScheduleEntry {
+                        timestamp: entry.timestamp,
+                        amount: 0,
+                    },
+                );
+                executed = true;
+
+                env.events().publish(
+                    (WITHDRAWAL_EXECUTED_TOPIC,),
+                    (vault_id, entry.amount),
+                );
+            }
+        }
+
+        if executed {
+            Self::save_vault(&env, vault_id, &vault);
+            env.storage()
+                .persistent()
+                .set(&DataKey::WithdrawalSchedule(vault_id), &schedule);
+        }
+
+        if executed {
+            Ok(())
+        } else {
+            Err(ContractError::NoScheduledWithdrawals)
+        }
+    }
+
+    // --- Issue #400: Conditional Acceptance ---
+
+    /// Beneficiary accepts with conditions. Beneficiary-only.
+    pub fn accept_with_conditions(
+        env: Env,
+        vault_id: u64,
+        conditions: String,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        vault.beneficiary.require_auth();
+
+        if conditions.len() == 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let entry = ConditionalAcceptanceEntry {
+            conditions,
+            approved_by_owner: false,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::ConditionalAcceptance(vault_id), &entry);
+
+        env.events().publish(
+            (CONDITIONS_ACCEPTED_TOPIC,),
+            (vault_id, vault.beneficiary.clone()),
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::ConditionalAcceptance(vault_id),
+            VAULT_TTL_THRESHOLD,
+            vault_ttl_ledgers(vault.check_in_interval),
+        );
+        Ok(())
+    }
+
+    /// Owner approves conditional acceptance.
+    pub fn approve_conditional_acceptance(env: Env, vault_id: u64) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        vault.owner.require_auth();
+
+        let key = DataKey::ConditionalAcceptance(vault_id);
+        let mut entry = env
+            .storage()
+            .persistent()
+            .get::<DataKey, ConditionalAcceptanceEntry>(&key)
+            .ok_or(ContractError::InvalidBeneficiary)?;
+
+        entry.approved_by_owner = true;
+        env.storage().persistent().set(&key, &entry);
+        Ok(())
+    }
+
+    /// Gets conditional acceptance entry if it exists.
+    pub fn get_conditional_acceptance(
+        env: Env,
+        vault_id: u64,
+    ) -> Option<ConditionalAcceptanceEntry> {
+        env.storage()
+            .persistent()
+            .get::<DataKey, ConditionalAcceptanceEntry>(&DataKey::ConditionalAcceptance(vault_id))
+    }
+
+    // --- Issue #399: Dispute Resolution ---
+
+    /// Files a dispute. Beneficiary-only.
+    pub fn file_dispute(env: Env, vault_id: u64, reason: String) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        vault.beneficiary.require_auth();
+
+        if reason.len() == 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let current_status = env
+            .storage()
+            .persistent()
+            .get::<DataKey, DisputeStatus>(&DataKey::DisputeStatus(vault_id))
+            .unwrap_or(DisputeStatus::None);
+
+        if current_status == DisputeStatus::Filed {
+            return Err(ContractError::DisputeFiled);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::DisputeStatus(vault_id), &DisputeStatus::Filed);
+
+        env.events().publish(
+            (DISPUTE_FILED_TOPIC,),
+            (vault_id, vault.beneficiary.clone(), reason),
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::DisputeStatus(vault_id),
+            VAULT_TTL_THRESHOLD,
+            vault_ttl_ledgers(vault.check_in_interval),
+        );
+        Ok(())
+    }
+
+    /// Resolves a dispute. Admin-only.
+    pub fn resolve_dispute(env: Env, vault_id: u64, resolution: String) -> Result<(), ContractError> {
+        Self::require_admin(&env);
+
+        let current_status = env
+            .storage()
+            .persistent()
+            .get::<DataKey, DisputeStatus>(&DataKey::DisputeStatus(vault_id))
+            .unwrap_or(DisputeStatus::None);
+
+        if current_status != DisputeStatus::Filed {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::DisputeStatus(vault_id), &DisputeStatus::Resolved);
+
+        env.events().publish(
+            (DISPUTE_RESOLVED_TOPIC,),
+            (vault_id, resolution),
+        );
+        Ok(())
+    }
+
+    /// Gets the dispute status for a vault.
+    pub fn get_dispute_status(env: Env, vault_id: u64) -> DisputeStatus {
+        env.storage()
+            .persistent()
+            .get::<DataKey, DisputeStatus>(&DataKey::DisputeStatus(vault_id))
+            .unwrap_or(DisputeStatus::None)
     }
 }
