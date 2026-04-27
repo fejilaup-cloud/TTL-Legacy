@@ -2959,3 +2959,81 @@ fn test_approve_conditional_acceptance() {
     assert!(stored.is_some());
     assert_eq!(stored.unwrap().approved_by_owner, true);
 }
+
+
+// ---- Issue #399: Dispute Resolution Tests ----
+
+#[test]
+fn test_file_dispute() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let reason = String::from_str(&env, "Funds are incorrect");
+    
+    // Beneficiary files dispute
+    client.file_dispute(&vault_id, &reason);
+    
+    // Verify dispute status
+    let status = client.get_dispute_status(&vault_id);
+    assert_eq!(status, DisputeStatus::Filed);
+}
+
+#[test]
+fn test_file_dispute_beneficiary_only() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let reason = String::from_str(&env, "Some reason");
+    
+    // Non-beneficiary cannot file dispute
+    let result = client.try_file_dispute(&vault_id, &reason);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_resolve_dispute() {
+    let (env, owner, beneficiary, admin, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let reason = String::from_str(&env, "Funds are incorrect");
+    let resolution = String::from_str(&env, "Verified and approved");
+    
+    client.file_dispute(&vault_id, &reason);
+    
+    // Admin resolves dispute
+    client.resolve_dispute(&vault_id, &resolution);
+    
+    // Verify dispute resolved
+    let status = client.get_dispute_status(&vault_id);
+    assert_eq!(status, DisputeStatus::Resolved);
+}
+
+#[test]
+fn test_resolve_dispute_admin_only() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let reason = String::from_str(&env, "Some reason");
+    let resolution = String::from_str(&env, "Resolved");
+    
+    client.file_dispute(&vault_id, &reason);
+    
+    // Non-admin cannot resolve
+    let result = client.try_resolve_dispute(&vault_id, &resolution);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_cannot_file_duplicate_dispute() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let reason = String::from_str(&env, "First dispute");
+    let reason2 = String::from_str(&env, "Second dispute");
+    
+    client.file_dispute(&vault_id, &reason);
+    
+    // Cannot file another dispute while one is pending
+    let result = client.try_file_dispute(&vault_id, &reason2);
+    assert!(result.is_err());
+}
